@@ -23,7 +23,7 @@ async function runOnce() {
     console.log("   /create loaded with heading:", heading.trim());
 
     console.log("2. Select 'Логотип' template");
-    await page.locator('.cursor-pointer:has-text("Логотип")').first().click();
+    await page.getByText("Логотип", { exact: true }).first().click();
     // wait for the chat to become active
     await page.waitForFunction(() => {
       const t = document.querySelector('textarea');
