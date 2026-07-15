@@ -27,6 +27,7 @@ export async function POST(request: NextRequest) {
         isActive: typeof body.isActive === "boolean" ? body.isActive : true,
         displayOrder: Number(body.displayOrder) || 0,
         fields: body.fields || [],
+        promptHints: body.promptHints || null,
       },
     });
     return NextResponse.json({ template }, { status: 201 });
@@ -52,6 +53,7 @@ export async function PUT(request: NextRequest) {
         displayOrder: typeof data.displayOrder === "number" ? data.displayOrder : undefined,
         isActive: typeof data.isActive === "boolean" ? data.isActive : undefined,
         fields: Array.isArray(data.fields) ? data.fields : undefined,
+        promptHints: data.promptHints === null || data.promptHints === undefined ? undefined : data.promptHints,
       },
     });
 

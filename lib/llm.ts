@@ -4,8 +4,14 @@ import { placeholderSVG } from "./design";
 export type Concept = {
   name: string;
   description: string;
+  explanation?: string;
   palette: string[];
   recommendations: string[];
+};
+
+export type ConceptGenerationResult = {
+  concepts: Concept[];
+  analysis?: string;
 };
 
 export type Brief = {
@@ -70,23 +76,48 @@ async function callChatCompletion(
   }
 }
 
-export async function generateConcepts(brief: Brief): Promise<Concept[]> {
+export async function generateConcepts(
+  brief: Brief,
+  template?: { slug: string; name: string; category: string; promptHints?: any } | null
+): Promise<ConceptGenerationResult> {
   const promptConfig = await prisma.promptConfig.findUnique({
     where: { key: "conceptGeneration" },
   });
-  const systemPrompt =
+  let systemPrompt =
     promptConfig?.prompt ||
-    `Ты — опытный арт-директор и маркетолог. На основе брифа клиента придумай 4-6 концепций дизайна. Для каждой концепции дай: название (1-2 слова), краткое описание (1-2 предложения), палитра из 5 hex-кодов, 3 рекомендации по стилю. Верни ТОЛЬКО JSON-объект со свойством "concepts" — массив объектов {name, description, palette, recommendations}. Без markdown, без пояснений.`;
+    `Ты — опытный арт-директор и маркетолог. Проанализируй нишу клиента и предложи 4-6 концепций дизайна.
 
+Верни ТОЛЬКО JSON-объект вида:
+{
+  "analysis": "2-4 предложения: что работает в нише, какая палитра/стиль подойдут, почему.",
+  "concepts": [
+    {
+      "name": "1-2 слова",
+      "description": "1-2 предложения",
+      "explanation": "1-2 предложения, почему эта концепция подходит конкретно для этого бизнеса/аудитории",
+      "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"],
+      "recommendations": ["...", "...", "..."]
+    }
+  ]
+}
+
+Без markdown, без пояснений вне JSON.`;
+
+  const templateConceptHint = template?.promptHints?.concept;
+  if (templateConceptHint) {
+    systemPrompt += `\n\nУточнение для типа дизайна "${template.name}": ${templateConceptHint}`;
+  }
+
+  const templateLine = template ? `\n- Тип дизайна: ${template.name} (${template.category})` : "";
   const userPrompt = `Бриф клиента:
 - Название: ${brief.companyName || "—"}
 - Чем занимается: ${brief.businessDesc || "—"}
 - Сайт: ${brief.website || "—"}
 - Целевая аудитория: ${brief.targetAudience || "—"}
 - Предпочитаемый стиль: ${brief.style || "—"}
-- Фирменные цвета: ${brief.colors?.join(", ") || "—"}
+- Фирменные цвета: ${brief.colors?.join(", ") || "—"}${templateLine}
 
-Сгенерируй концепции. Верни ТОЛЬКО JSON.`;
+Сначала проведи краткий анализ ниши, затем предложи концепции. Верни ТОЛЬКО JSON.`;
 
   const text = await callChatCompletion(systemPrompt, userPrompt);
   if (text) {
@@ -100,7 +131,7 @@ export async function generateConcepts(brief: Brief): Promise<Concept[]> {
   return fallbackConcepts();
 }
 
-function parseConcepts(text: string): Concept[] {
+function parseConcepts(text: string): ConceptGenerationResult {
   const cleaned = text.replace(/```json|```/g, "").trim();
   const candidates = [cleaned, cleaned.replace(/\r?\n/g, "")];
 
@@ -109,12 +140,16 @@ function parseConcepts(text: string): Concept[] {
       const parsed = JSON.parse(candidate);
       const concepts = Array.isArray(parsed.concepts) ? parsed.concepts : parsed;
       if (!Array.isArray(concepts)) throw new Error("invalid concepts");
-      return concepts.slice(0, 6).map((c: any) => ({
-        name: String(c.name || "Концепция"),
-        description: String(c.description || ""),
-        palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
-        recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
-      }));
+      return {
+        analysis: typeof parsed.analysis === "string" ? parsed.analysis : undefined,
+        concepts: concepts.slice(0, 6).map((c: any) => ({
+          name: String(c.name || "Концепция"),
+          description: String(c.description || ""),
+          explanation: typeof c.explanation === "string" ? c.explanation : undefined,
+          palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
+          recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
+        })),
+      };
     } catch {
       // try next candidate
     }
@@ -124,33 +159,40 @@ function parseConcepts(text: string): Concept[] {
   return fallbackConcepts();
 }
 
-function fallbackConcepts(): Concept[] {
-  return [
-    {
-      name: "Минимализм",
-      description: "Чистый современный стиль с акцентом на типографику.",
-      palette: ["#0f172a", "#f8fafc", "#64748b", "#e2e8f0", "#3b82f6"],
-      recommendations: ["Много воздуха", "Минимум цветов", "Современные шрифты"],
-    },
-    {
-      name: "Премиум",
-      description: "Темные цвета и акценты для премиального позиционирования.",
-      palette: ["#1a1a1a", "#d4af37", "#f5f5f5", "#8a8a8a", "#111111"],
-      recommendations: ["Используйте шрифты с засечками", "Металлические детали", "Низкая контрастность"],
-    },
-    {
-      name: "Современный",
-      description: "Градиенты, стекло и объем для современного digital-стиля.",
-      palette: ["#6366f1", "#ec4899", "#06b6d4", "#f0f9ff", "#1e293b"],
-      recommendations: ["Яркие градиенты", "Эффект стекла", "Крупные формы"],
-    },
-    {
-      name: "Яркий продающий",
-      description: "Максимальный акцент на акциях и выгоде.",
-      palette: ["#ef4444", "#facc15", "#ffffff", "#1f2937", "#22c55e"],
-      recommendations: ["Крупные проценты", "Контрастные кнопки", "Эмоциональные слова"],
-    },
-  ];
+function fallbackConcepts(): ConceptGenerationResult {
+  return {
+    analysis: "Для данного бизнеса подойдут чистые современные стили с контрастной типографикой и сдержанной палитрой, которая передаёт профессионализм.",
+    concepts: [
+      {
+        name: "Минимализм",
+        description: "Чистый современный стиль с акцентом на типографику.",
+        explanation: "Минимализм универсален для большинства ниш: он выглядит профессионально и не отвлекает от сути предложения.",
+        palette: ["#0f172a", "#f8fafc", "#64748b", "#e2e8f0", "#3b82f6"],
+        recommendations: ["Много воздуха", "Минимум цветов", "Современные шрифты"],
+      },
+      {
+        name: "Премиум",
+        description: "Темные цвета и акценты для премиального позиционирования.",
+        explanation: "Тёмная палитра с золотыми/металлическими акцентами ассоциируется с высоким качеством и статусом.",
+        palette: ["#1a1a1a", "#d4af37", "#f5f5f5", "#8a8a8a", "#111111"],
+        recommendations: ["Используйте шрифты с засечками", "Металлические детали", "Низкая контрастность"],
+      },
+      {
+        name: "Современный",
+        description: "Градиенты, стекло и объем для современного digital-стиля.",
+        explanation: "Яркие градиенты и объёмные формы хорошо работают для digital-продуктов и молодой аудитории.",
+        palette: ["#6366f1", "#ec4899", "#06b6d4", "#f0f9ff", "#1e293b"],
+        recommendations: ["Яркие градиенты", "Эффект стекла", "Крупные формы"],
+      },
+      {
+        name: "Яркий продающий",
+        description: "Максимальный акцент на акциях и выгоде.",
+        explanation: "Контрастные цвета и крупная типографика быстро привлекают внимание и стимулируют к действию.",
+        palette: ["#ef4444", "#facc15", "#ffffff", "#1f2937", "#22c55e"],
+        recommendations: ["Крупные проценты", "Контрастные кнопки", "Эмоциональные слова"],
+      },
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +203,7 @@ export type DesignGenerationInput = {
   brief: Brief;
   concept: Concept;
   data: Record<string, string>;
-  template: { slug: string; name: string; category: string };
+  template: { slug: string; name: string; category: string; promptHints?: any };
   viewBox: string;
 };
 
@@ -170,24 +212,22 @@ export async function generateDesigns(
   count = 4,
   signal?: AbortSignal
 ): Promise<{ svg: string; label: string; metadata?: any }[]> {
-  const results: { svg: string; label: string; metadata?: any }[] = [];
+  if (signal?.aborted) return [];
 
-  for (let i = 0; i < count; i++) {
-    if (signal?.aborted) break;
+  const variants = Array.from({ length: count }, (_, i) => i);
+  const promises = variants.map(async (i) => {
+    if (signal?.aborted) return { svg: placeholderSVG(input, i), label: `Вариант ${i + 1}`, metadata: { aborted: true } };
     try {
       const svg = await generateOneSvg(input, i);
-      if (svg) {
-        results.push({ svg, label: `Вариант ${i + 1}` });
-        continue;
-      }
-      results.push({ svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` });
+      if (svg) return { svg, label: `Вариант ${i + 1}` };
+      return { svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` };
     } catch (e) {
       console.error(`Design variant ${i} error`, e);
-      results.push({ svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` });
+      return { svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` };
     }
-  }
+  });
 
-  return results;
+  return Promise.all(promises);
 }
 
 async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
@@ -226,18 +266,23 @@ function buildDesignPrompt(input: DesignGenerationInput, variantIndex: number): 
     .map(([k, v]) => `${k}: ${v}`)
     .join("\n");
 
+  const designHint = template.promptHints?.design
+    ? `\n\nТип дизайна "${template.name}" (${template.category}). Специфические требования: ${template.promptHints.design}`
+    : `\n\nTemplate: ${template.name} (${template.category}).`;
+  const transparentNote = template.promptHints?.transparent
+    ? "\n\nBackground must be transparent. Do NOT draw any background rectangle, gradient or fill behind the main design. Only the design elements on a transparent canvas."
+    : "";
+
   return `Design a ${orientation} marketing graphic for a business.
 
 Canvas: viewBox="${viewBox}".
 
 Business: ${brief.companyName || ""} — ${brief.businessDesc || ""}. Target audience: ${brief.targetAudience || ""}.
 
-Design concept "${concept.name}": ${concept.description}. Palette (use only these hex colors): ${concept.palette.join(", ")}.
+Design concept "${concept.name}": ${concept.description}. Palette (use only these hex colors): ${concept.palette.join(", ")}.${designHint}${transparentNote}
 
 Required text / data:
 ${textBlocks || "( create short marketing text in Russian )"}
-
-Template: ${template.name} (${template.category}).
 
 Composition preference for this variant (#${variantIndex + 1}): ${styleHints[variantIndex % styleHints.length]}.
 

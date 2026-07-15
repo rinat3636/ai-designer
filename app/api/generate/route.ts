@@ -67,7 +67,12 @@ export async function POST(request: NextRequest) {
         brief: brief as Brief,
         concept: concept as Concept,
         data: data || {},
-        template: { slug: template.slug, name: template.name, category: template.category },
+        template: {
+          slug: template.slug,
+          name: template.name,
+          category: template.category,
+          promptHints: template.promptHints as any,
+        },
         viewBox,
       },
       Math.max(2, Math.min(8, Number(count) || 4))

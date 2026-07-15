@@ -25,6 +25,7 @@ export function placeholderSVG(input: DesignGenerationInput, variantIndex = 0): 
   const subheadline = String(data.subheadline || data.productDesc || brief.businessDesc || concept.name);
   const discount = data.discount || data.oldPrice || "";
   const cta = data.buttonText || "Подробнее";
+  const transparent = template.promptHints?.transparent === true || template.slug.includes("logo") || template.slug.includes("icons");
 
   const seed = variantIndex * 137;
   const rand = (n: number) => Math.abs((Math.sin(seed + n) * 10000) % 1);
@@ -49,13 +50,17 @@ export function placeholderSVG(input: DesignGenerationInput, variantIndex = 0): 
     </defs>
   `;
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${w}" height="${h}">
-  ${defs}
-  <rect width="${w}" height="${h}" fill="url(#${gradientId})" />
+  const backgroundLayer = transparent
+    ? ""
+    : `<rect width="${w}" height="${h}" fill="url(#${gradientId})" />
   <g transform="rotate(${accentRot} ${w / 2} ${h / 2})" opacity="0.08">
     <circle cx="${accentX}" cy="${accentY}" r="${Math.min(w, h) * 0.35}" fill="${c3}" />
     <rect x="${accentX - 100}" y="${accentY - 100}" width="${Math.min(w, h) * 0.5}" height="${Math.min(w, h) * 0.5}" fill="${c4}" />
-  </g>
+  </g>`;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${w}" height="${h}">
+  ${defs}
+  ${backgroundLayer}
   ${discount ? `<circle cx="${w - 140}" cy="140" r="90" fill="${c4}" filter="url(#shadow-${variantIndex})" />
   <text x="${w - 140}" y="150" text-anchor="middle" fill="${c2}" font-size="42" font-family="sans-serif" font-weight="700" dominant-baseline="middle">${escapeXml(discount)}</text>` : ""}
   <text x="${tx}" y="${h * 0.38}" text-anchor="${align === "middle" ? "middle" : align}" fill="${c4}" font-size="${Math.min(w, h) * 0.085}" font-family="sans-serif" font-weight="800">${escapeXml(headline.slice(0, 40))}</text>
