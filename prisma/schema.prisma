@@ -1,0 +1,158 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  name          String?
+  password      String
+  role          Role      @default(USER)
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  brandSettings BrandSettings?
+  subscription  Subscription?
+  generations   Generation[]
+  adminLogs     AdminLog[]
+}
+
+model BrandSettings {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName    String?
+  businessDesc   String?
+  website        String?
+  phone          String?
+  telegram       String?
+  email          String?
+  address        String?
+  logoUrl        String?
+  colors         Json?
+  fonts          Json?
+  targetAudience String?
+  style          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model Template {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  category    String
+  categoryKey String   // machine slug for grouping
+  name        String
+  description String?
+  icon        String?
+  fields      Json?
+  promptHints Json?
+  isActive    Boolean  @default(true)
+  displayOrder Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  generations Generation[]
+}
+
+model Generation {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  templateId  String
+  template    Template @relation(fields: [templateId], references: [id])
+  title       String?
+  brief       Json?
+  conceptName String?
+  status      String   @default("pending")
+  prompt      String?
+  isFavorite  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  images GenerationImage[]
+}
+
+model GenerationImage {
+  id           String     @id @default(uuid())
+  generationId String
+  generation   Generation @relation(fields: [generationId], references: [id], onDelete: Cascade)
+  url          String
+  label        String?
+  style        String?
+  format       String     @default("png")
+  isSelected   Boolean    @default(false)
+  metadata     Json?
+  createdAt    DateTime   @default(now())
+}
+
+model SubscriptionPlan {
+  id            String         @id @default(uuid())
+  slug          String         @unique
+  name          String
+  description   String?
+  priceMonthly  Int
+  monthlyLimit  Int
+  features      Json?
+  isActive      Boolean        @default(true)
+  displayOrder  Int            @default(0)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                       String           @id @default(uuid())
+  userId                   String           @unique
+  user                     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId                   String
+  plan                     SubscriptionPlan @relation(fields: [planId], references: [id])
+  isActive                 Boolean          @default(true)
+  generationsUsedThisMonth Int              @default(0)
+  promoCode                String?
+  expiresAt                DateTime?
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
+}
+
+model PromoCode {
+  code             String   @id
+  maxUses          Int?
+  usedCount        Int      @default(0)
+  bonusGenerations Int      @default(0)
+  upgradePlanTo    String?
+  expiresAt        DateTime?
+  createdAt        DateTime @default(now())
+}
+
+model PromptConfig {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  prompt      String
+  description String?
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AdminLog {
+  id        String   @id @default(uuid())
+  action    String
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  details   String?
+  createdAt DateTime @default(now())
+}
