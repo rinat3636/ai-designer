@@ -34,3 +34,16 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## AI Model & Limits
+
+The app uses an OpenAI-compatible proxy at `ANTHROPIC_BASE_URL`.
+
+- `ANTHROPIC_MODEL` — default model used for generation and edits.
+- `claude-sonnet-4-6` is used as the automatic fallback when the primary model returns 524/timeouts.
+- `max_output_tokens` is sent alongside `max_tokens` to maximize compatibility.
+- Default token budgets:
+  - New generation: 12000 tokens
+  - Design edits: 16000 tokens (uploaded images often need more room for faithful recreation)
+- Request timeout is scaled with token budget (max 4 minutes).
+- To manually switch models, set `ANTHROPIC_MODEL` in `.env` and restart the server.

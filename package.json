@@ -9,6 +9,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "db:seed": "tsx prisma/seed.ts",
+    "test": "npm run test:unit",
+    "test:unit": "tsx scripts/llm-api.test.ts",
     "test:e2e": "node scripts/e2e-smoke.mjs && node scripts/e2e-image-edit.mjs",
     "postinstall": "prisma generate"
   },

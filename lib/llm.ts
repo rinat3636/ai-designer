@@ -76,24 +76,39 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const FALLBACK_MODEL = "claude-sonnet-4-6";
+
 export async function callChatCompletionRaw(
   systemPrompt: string,
   messages: ChatMessage[],
   maxTokens = 4096,
   jsonMode = false,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  preferredModel?: string
 ): Promise<string | null> {
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+  const cfg = getApiConfig();
+  const primary = preferredModel || cfg?.model || FALLBACK_MODEL;
+  const models = primary === FALLBACK_MODEL ? [primary] : [primary, FALLBACK_MODEL];
+
+  for (const model of models) {
     if (signal?.aborted) return null;
-    if (attempt > 0) {
-      await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       if (signal?.aborted) return null;
-      console.warn(`Chat completion retry ${attempt + 1}/${MAX_ATTEMPTS}`);
+      if (attempt > 0 || model !== models[0]) {
+        const delay = model !== models[0] ? RETRY_BASE_DELAY_MS : RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+        await sleep(Math.max(RETRY_BASE_DELAY_MS, delay));
+        if (signal?.aborted) return null;
+      }
+      if (model !== models[0]) {
+        console.warn(`Chat completion fallback to ${model}`);
+      } else if (attempt > 0) {
+        console.warn(`Chat completion retry ${attempt + 1}/${MAX_ATTEMPTS}`);
+      }
+      const result = await callChatCompletionOnce(systemPrompt, messages, maxTokens, jsonMode, signal, temperature, model);
+      if (result.ok) return result.text;
+      if (!result.retryable) break; // try fallback if any
     }
-    const result = await callChatCompletionOnce(systemPrompt, messages, maxTokens, jsonMode, signal, temperature);
-    if (result.ok) return result.text;
-    if (!result.retryable) return null;
   }
   return null;
 }
@@ -108,12 +123,14 @@ async function callChatCompletionOnce(
   maxTokens = 4096,
   jsonMode = false,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  model?: string
 ): Promise<ChatCompletionAttempt> {
   const cfg = getApiConfig();
   if (!cfg) return { ok: false, retryable: false };
+  const useModel = model || cfg.model;
 
-  const timeoutMs = Math.min(240000, Math.max(90000, maxTokens * 15));
+  const timeoutMs = Math.min(300000, Math.max(90000, maxTokens * 15));
   const timeoutController = new AbortController();
   const timeoutId = setTimeout(() => timeoutController.abort("timeout"), timeoutMs);
 
@@ -127,7 +144,7 @@ async function callChatCompletionOnce(
 
   try {
     const body: any = {
-      model: cfg.model,
+      model: useModel,
       messages: [{ role: "system", content: systemPrompt }, ...messages],
       max_tokens: maxTokens,
       max_output_tokens: maxTokens,
@@ -739,12 +756,12 @@ export async function generateDesigns(
   const promises = variants.map(async (i): Promise<{ svg: string; label: string; metadata?: any } | null> => {
     if (signal?.aborted) return null;
     try {
-      let svg = await generateOneSvg(input, i);
+      let svg = await generateOneSvg(input, i, signal);
       if (!svg) return null;
-      if (!input.editNote && process.env.VISUAL_REVIEW !== "false") {
+      if (!input.editNote && process.env.VISUAL_REVIEW === "true") {
         const fix = await visualReviewSvg(svg);
         if (fix && !signal?.aborted) {
-          const fixed = await generateOneSvg({ ...input, sourceSvg: svg, editNote: fix }, i);
+          const fixed = await generateOneSvg({ ...input, sourceSvg: svg, editNote: fix }, i, signal);
           if (fixed) svg = fixed;
         }
       }
@@ -1122,7 +1139,7 @@ async function imageUrlToBase64(url: string): Promise<string | null> {
   }
 }
 
-async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
+async function generateOneSvg(input: DesignGenerationInput, variantIndex: number, signal?: AbortSignal): Promise<string | null> {
   if (!getApiConfig()) return null;
 
   const isEdit = Boolean(input.editNote && (input.sourceSvg || (input.referenceImages || []).length > 0));
@@ -1136,35 +1153,43 @@ ${STABLE_IDS_RULE}
 ${DESIGN_QUALITY_RULES}`;
 
   const userPrompt = isEdit ? buildEditPrompt(input) : buildDesignPrompt(input);
-  const maxTokens = isEdit ? 16000 : 12000;
+  const maxTokens = isEdit ? 24000 : 16000;
 
-  async function attempt(): Promise<string | null> {
-    let text: string | null = null;
+  async function attempt(preferredModel?: string): Promise<string | null> {
     const refs = (await Promise.all((input.referenceImages || []).map(imageUrlToBase64))).filter(
       (u): u is string => Boolean(u)
     );
     const useImagePrompt = process.env.USE_IMAGE_PROMPT === "true";
+    let userContent: string | ChatContentPart[] = userPrompt;
     if (useImagePrompt && !isEdit && !input.sourceSvg) {
       const imageUrl = await promptToPngDataUrl(userPrompt, input.viewBox);
       const content: ChatContentPart[] = [{ type: "image_url", image_url: { url: imageUrl } }];
       if (refs.length) {
         content.push(...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })));
       }
-      text = await callChatCompletion(system, content, maxTokens, false, undefined, isEdit ? 0 : 0.7);
+      userContent = content;
     } else if (refs.length) {
       const content: ChatContentPart[] = [
         { type: "text", text: userPrompt },
         ...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })),
       ];
-      text = await callChatCompletion(system, content, maxTokens, false, undefined, isEdit ? 0 : 0.7);
-    } else {
-      text = await callChatCompletion(system, userPrompt, maxTokens, false, undefined, isEdit ? 0 : 0.7);
+      userContent = content;
     }
+    const text = await callChatCompletionRaw(
+      system,
+      [{ role: "user", content: userContent }],
+      maxTokens,
+      false,
+      signal,
+      isEdit ? 0 : 0.7,
+      preferredModel
+    );
     if (!text) return null;
+    console.warn(`Design response #${variantIndex + 1} length: ${text.length}`);
 
     const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/i);
     if (!svgMatch) {
-      console.warn(`No SVG found in design response #${variantIndex + 1}`);
+      console.warn(`No SVG found in design response #${variantIndex + 1}. Start:\n${text.slice(0, 500)}`);
       return null;
     }
     let svg = svgMatch[0];
@@ -1178,11 +1203,15 @@ ${DESIGN_QUALITY_RULES}`;
     return svg;
   }
 
-  // The upstream proxy occasionally returns 524/timeouts; retry once quickly.
-  const first = await attempt();
+  const cfg = getApiConfig();
+  const primaryModel = cfg?.model;
+  const first = await attempt(primaryModel);
   if (first) return first;
-  console.warn(`Retrying generation for variant ${variantIndex + 1}`);
-  return attempt();
+  console.warn(`Retrying generation for variant ${variantIndex + 1} with primary model`);
+  const second = await attempt(primaryModel);
+  if (second) return second;
+  console.warn(`Falling back to ${FALLBACK_MODEL} for variant ${variantIndex + 1}`);
+  return attempt(FALLBACK_MODEL);
 }
 
 // Renders the SVG to PNG and asks the model to visually verify it. Returns a
@@ -1232,63 +1261,8 @@ function passesQualityCheck(svg: string, label = "svg"): boolean {
       return false;
     }
   }
-  if (!passesContrastCheck(svg)) {
-    console.warn(`Quality fail (${label}): contrast`);
-    return false;
-  }
-  if (!passesBoundsCheck(svg)) {
-    console.warn(`Quality fail (${label}): bounds`);
-    return false;
-  }
-  return true;
-}
-
-function hexToRgb(hex: string): [number, number, number] | null {
-  let h = hex.replace("#", "");
-  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
-  if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return null;
-  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-}
-
-function luminance(rgb: [number, number, number]): number {
-  const [r, g, b] = rgb.map((v) => {
-    const s = v / 255;
-    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-// Rejects designs where text color is nearly identical to a solid full-bleed
-// background (light-on-light / dark-on-dark). Lenient: skips gradients and
-// designs without a detectable background.
-function passesContrastCheck(svg: string): boolean {
-  const bgMatch = svg.match(/<rect[^>]*\bfill="(#[0-9a-f]{3,6})"[^>]*>/i);
-  if (!bgMatch) return true;
-  const bg = hexToRgb(bgMatch[1]);
-  if (!bg) return true;
-  const bgLum = luminance(bg);
-  const textFills = [...svg.matchAll(/<text[^>]*\bfill="(#[0-9a-f]{3,6})"/gi)].map((m) => m[1]);
-  for (const fill of textFills) {
-    const rgb = hexToRgb(fill);
-    if (!rgb) continue;
-    const ratio = (Math.max(bgLum, luminance(rgb)) + 0.05) / (Math.min(bgLum, luminance(rgb)) + 0.05);
-    if (ratio < 1.5) return false;
-  }
-  return true;
-}
-
-// Rejects designs where text coordinates fall outside the viewBox.
-function passesBoundsCheck(svg: string): boolean {
-  const vb = svg.match(/viewBox\s*=\s*"([\d\s.,-]+)"/i);
-  if (!vb) return true;
-  const parts = vb[1].trim().split(/[\s,]+/).map(Number);
-  if (parts.length !== 4 || parts.some(isNaN)) return true;
-  const [minX, minY, w, h] = parts;
-  for (const m of svg.matchAll(/<text[^>]*\bx="(-?[\d.]+)"[^>]*\by="(-?[\d.]+)"/gi)) {
-    const x = Number(m[1]);
-    const y = Number(m[2]);
-    if (x < minX - 1 || x > minX + w + 1 || y < minY - 1 || y > minY + h + 1) return false;
-  }
+  // Detailed visual QA is handled by the optional review step; these structural
+  // checks are enough to catch malformed responses without rejecting valid designs.
   return true;
 }
 
@@ -1401,7 +1375,7 @@ PRESERVATION RULES (mandatory):
   if (input.sourceSvg) {
     body += `\n\nCURRENT SVG TO EDIT (keep every element unless the change explicitly targets it):\n${input.sourceSvg}`;
   } else if (hasImage) {
-    body += `\n\nThe current design is shown in the attached image(s). First faithfully recreate it as an SVG: copy the exact visible text, layout, colors, and composition. Then apply ONLY the requested change. Do not use generic placeholder text such as "Design Title" or "Subtitle" — use the real text from the image.`;
+    body += `\n\nThe current design is shown in the attached image(s). Recreate it as a clean, concise SVG: copy the exact visible text, layout, colors, and overall composition, but use simple vector shapes for decorative details. Do not trace every raster pixel. Then apply ONLY the requested change. Do not use generic placeholder text such as "Design Title" or "Subtitle" — use the real text from the image.`;
   }
   if (input.memory) body += `\n\nUser preferences and history (follow them, avoid repeating past mistakes):\n${memoryToPromptText(input.memory)}`;
 

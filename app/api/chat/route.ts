@@ -8,6 +8,7 @@ import {
   resolveTemplateFromText,
   callChatCompletion,
   extractJson,
+  analyzeImage,
   type Brief,
   type Concept,
   type ChatMessage,
@@ -143,7 +144,7 @@ async function generateFromRequest(
   const candidate = templates.find((t) => t.id === template.id);
   if (!candidate) throw new Error("Template not found");
 
-  const { brief, concept, data } = await extractBrief(candidate, message, memory);
+  let { brief, concept, data } = await extractBrief(candidate, message, memory);
   const rawRefs = files;
 
   let sourceSvg = "";
@@ -155,7 +156,29 @@ async function generateFromRequest(
   }
 
   const isUpload = rawRefs.length > 0;
-  const isEdit = isUpload && Boolean(sourceSvg);
+
+  // For uploaded raster images, analyze first so the generated SVG can preserve
+  // exact text, colors and layout.
+  if (isUpload && nonSvgRefs.length > 0) {
+    const analysis = await analyzeImage(nonSvgRefs[0]);
+    if (analysis.text || analysis.description) {
+      data = {
+        ...data,
+        extractedText: analysis.text,
+        layoutDescription: analysis.composition || analysis.description,
+        ...(analysis.palette?.length ? { palette: analysis.palette.join(", ") } : {}),
+      };
+      brief = {
+        ...brief,
+        style: analysis.style || brief.style,
+        colors: analysis.palette?.length ? analysis.palette : brief.colors,
+      };
+      concept = {
+        ...concept,
+        palette: analysis.palette?.length ? analysis.palette : concept.palette,
+      };
+    }
+  }
 
   let viewBox = getViewBoxForTemplate(candidate.slug);
   const userSize = parseUserSize(data?.size || brief?.size);
@@ -193,7 +216,7 @@ async function generateFromRequest(
         promptHints: candidate.promptHints as any,
       },
       viewBox,
-      editNote: isEdit ? message : undefined,
+      editNote: isUpload ? message : undefined,
       sourceSvg: sourceSvg || undefined,
       referenceImages: nonSvgRefs,
       memory,
@@ -339,98 +362,131 @@ async function answerQuestion(
   return text || "Я не понял вопрос. Попробуйте переформулировать.";
 }
 
-export async function POST(request: NextRequest) {
+function logChatApi(
+  start: number,
+  status: number,
+  body: any,
+  extra?: { projectId?: string; templateSlug?: string; error?: string }
+) {
+  const duration = Date.now() - start;
+  console.log(
+    JSON.stringify({
+      type: "chat-api",
+      status,
+      duration_ms: duration,
+      projectId: extra?.projectId,
+      templateSlug: extra?.templateSlug,
+      hasFiles: body?.files?.length > 0,
+      messageLength: (body?.message || "").length,
+      error: extra?.error,
+    })
+  );
+}
+
+async function handleChat(body: any) {
   const user = await getSession();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!rateLimit(`chat:${user.id}`, 10, 60_000)) return rateLimitResponse();
+  const { projectId, message = "", files = [], templateId } = body as {
+    projectId?: string;
+    message?: string;
+    files?: string[];
+    templateId?: string;
+  };
+  let text = (message || "").trim();
+  const uploadedFiles = Array.isArray(files) ? (files as string[]) : [];
+  if (uploadedFiles.length > 0 && !text) {
+    text = "Сохрани макет и примени небольшие улучшения";
+  }
 
-  try {
-    const body = await request.json();
-    const { projectId, message = "", files = [], templateId } = body as {
-      projectId?: string;
-      message?: string;
-      files?: string[];
-      templateId?: string;
-    };
-    let text = (message || "").trim();
-    const uploadedFiles = Array.isArray(files) ? (files as string[]) : [];
-    if (uploadedFiles.length > 0 && !text) {
-      text = "Сохрани макет и примени небольшие улучшения";
-    }
+  const subscription = await getOrCreateSubscription(user.id);
+  const limit = subscription?.plan.monthlyLimit ?? 0;
+  const used = subscription?.generationsUsedThisMonth ?? 0;
+  if (limit > 0 && used >= limit) {
+    return NextResponse.json({ error: "Monthly generation limit reached" }, { status: 403 });
+  }
 
-    const subscription = await getOrCreateSubscription(user.id);
-    const limit = subscription?.plan.monthlyLimit ?? 0;
-    const used = subscription?.generationsUsedThisMonth ?? 0;
-    if (limit > 0 && used >= limit) {
-      return NextResponse.json({ error: "Monthly generation limit reached" }, { status: 403 });
-    }
+  const memory = await buildMemorySnapshot(user.id);
 
-    const memory = await buildMemorySnapshot(user.id);
+  if (projectId) {
+    const generation = await prisma.generation.findFirst({
+      where: { id: projectId, userId: user.id },
+      include: { images: true, template: true },
+    });
+    if (!generation) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    if (projectId) {
-      const generation = await prisma.generation.findFirst({
-        where: { id: projectId, userId: user.id },
-        include: { images: true, template: true },
-      });
-      if (!generation) return NextResponse.json({ error: "Not found" }, { status: 404 });
-
-      if (looksLikeEdit(text, uploadedFiles.length > 0)) {
-        const result = await editFromRequest(user.id, generation, text, uploadedFiles, memory);
-        await prisma.generation.update({
-          where: { id: generation.id },
-          data: {
-            chatHistory: mergeHistory(generation.chatHistory, [
-              { role: "user", content: text || "" },
-              { role: "assistant", content: result.message || "" },
-            ]) as any,
-            status: "completed",
-          },
-        });
-        return NextResponse.json(result);
-      }
-
-      const answer = await answerQuestion(user.id, generation, text, memory);
+    if (looksLikeEdit(text, uploadedFiles.length > 0)) {
+      const result = await editFromRequest(user.id, generation, text, uploadedFiles, memory);
       await prisma.generation.update({
         where: { id: generation.id },
         data: {
           chatHistory: mergeHistory(generation.chatHistory, [
             { role: "user", content: text || "" },
-            { role: "assistant", content: answer || "" },
+            { role: "assistant", content: result.message || "" },
           ]) as any,
+          status: "completed",
         },
       });
-      return NextResponse.json({ message: answer, generation: null });
+      return NextResponse.json(result);
     }
 
-    // New design from uploaded image (edit own file)
-    if (uploadedFiles.length > 0) {
-      await ensureUploadTemplate();
-      return NextResponse.json(
-        await generateFromRequest(user.id, { id: UPLOAD_TEMPLATE_ID, slug: "custom-upload", name: "Редактировать свой макет", category: "Редактор" }, text || "Сохрани макет и примени небольшие улучшения", uploadedFiles, memory)
+    const answer = await answerQuestion(user.id, generation, text, memory);
+    await prisma.generation.update({
+      where: { id: generation.id },
+      data: {
+        chatHistory: mergeHistory(generation.chatHistory, [
+          { role: "user", content: text || "" },
+          { role: "assistant", content: answer || "" },
+        ]) as any,
+      },
+    });
+    return NextResponse.json({ message: answer, generation: null });
+  }
+
+  // New design from uploaded image (edit own file)
+  if (uploadedFiles.length > 0) {
+    await ensureUploadTemplate();
+    return NextResponse.json(
+      await generateFromRequest(user.id, { id: UPLOAD_TEMPLATE_ID, slug: "custom-upload", name: "Редактировать свой макет", category: "Редактор" }, text || "Сохрани макет и примени небольшие улучшения", uploadedFiles, memory)
+    );
+  }
+
+  // New design from text
+  const activeTemplates = await prisma.template.findMany({ where: { isActive: true } });
+  const requestedTemplate = templateId ? activeTemplates.find((t) => t.id === templateId) : undefined;
+  const resolution = requestedTemplate
+    ? { templateId: requestedTemplate.id, slug: requestedTemplate.slug, size: null }
+    : await resolveTemplateFromText(
+        text,
+        activeTemplates.map((t) => ({ id: t.id, slug: t.slug, name: t.name, category: t.category, description: t.description }))
       );
-    }
+  if (!resolution.templateId) {
+    return NextResponse.json({
+      message:
+        "Не удалось определить тип дизайна. Уточните, что хотите создать: логотип, баннер, визитку, сертификат, пост и т.д.",
+    });
+  }
+  const template = activeTemplates.find((t) => t.id === resolution.templateId);
+  if (!template) return NextResponse.json({ error: "Template not found" }, { status: 404 });
 
-    // New design from text
-    const activeTemplates = await prisma.template.findMany({ where: { isActive: true } });
-    const requestedTemplate = templateId ? activeTemplates.find((t) => t.id === templateId) : undefined;
-    const resolution = requestedTemplate
-      ? { templateId: requestedTemplate.id, slug: requestedTemplate.slug, size: null }
-      : await resolveTemplateFromText(
-          text,
-          activeTemplates.map((t) => ({ id: t.id, slug: t.slug, name: t.name, category: t.category, description: t.description }))
-        );
-    if (!resolution.templateId) {
-      return NextResponse.json({
-        message:
-          "Не удалось определить тип дизайна. Уточните, что хотите создать: логотип, баннер, визитку, сертификат, пост и т.д.",
-      });
-    }
-    const template = activeTemplates.find((t) => t.id === resolution.templateId);
-    if (!template) return NextResponse.json({ error: "Template not found" }, { status: 404 });
+  return NextResponse.json(await generateFromRequest(user.id, template, text, [], memory));
+}
 
-    return NextResponse.json(await generateFromRequest(user.id, template, text, [], memory));
+export async function POST(request: NextRequest) {
+  const start = Date.now();
+  let body: any = {};
+  try {
+    body = await request.json();
+  } catch {
+    // invalid JSON will be handled by handleChat returning an error
+  }
+  try {
+    const response = await handleChat(body);
+    logChatApi(start, response.status, body);
+    return response;
   } catch (error: any) {
     console.error("Chat API error", error);
+    logChatApi(start, 500, body, { error: error.message || "Chat processing failed" });
     return NextResponse.json(
       { error: error.message || "Chat processing failed" },
       { status: 500 }
