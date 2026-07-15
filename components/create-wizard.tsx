@@ -894,10 +894,10 @@ export function CreateWizard({
         </div>
       )}
       <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 md:grid-cols-[360px_1fr]">
-        <div className="order-2 flex min-h-0 flex-col md:order-1">
+        <div className="order-1 flex min-h-0 flex-col">
           {ChatPanel()}
         </div>
-        <div className="order-1 min-h-0 overflow-hidden rounded-xl border bg-card shadow-sm md:order-2">
+        <div className="order-2 min-h-0 overflow-hidden rounded-xl border bg-card shadow-sm">
           <div className="h-full overflow-y-auto p-4">
             {MainPanel()}
           </div>
