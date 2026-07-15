@@ -47,7 +47,7 @@ export type InterviewResult = {
   concepts?: Concept[];
 };
 
-type InterviewTemplate = {
+export type InterviewTemplate = {
   slug: string;
   name: string;
   category: string;
@@ -76,7 +76,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function callChatCompletionRaw(
+export async function callChatCompletionRaw(
   systemPrompt: string,
   messages: ChatMessage[],
   maxTokens = 4096,
@@ -169,7 +169,7 @@ async function callChatCompletionOnce(
   }
 }
 
-async function callChatCompletion(
+export async function callChatCompletion(
   systemPrompt: string,
   userPrompt: string | ChatContentPart[],
   maxTokens = 4096,
@@ -344,7 +344,7 @@ async function finishOrAsk(
   return result;
 }
 
-function extractJson(text: string): string | null {
+export function extractJson(text: string): string | null {
   text = text.replace(/```json|```/g, "").trim();
 
   // Try to find the largest balanced { ... } or [ ... ] block.
