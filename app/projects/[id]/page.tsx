@@ -5,7 +5,6 @@ import { ResultGallery } from "@/components/result-gallery";
 
 export default async function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await getSession();
-  if (!user) return notFound();
 
   const { id } = await params;
   const generation = await prisma.generation.findFirst({

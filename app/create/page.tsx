@@ -1,11 +1,9 @@
-import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { CreateWizard } from "@/components/create-wizard";
 
 export default async function CreatePage() {
   const user = await getSession();
-  if (!user) redirect("/login");
 
   const templates = await prisma.template.findMany({
     where: { isActive: true },

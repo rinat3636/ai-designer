@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
+import { prisma } from "@/lib/prisma";
 
 export type SessionUser = {
   id: string;
@@ -10,6 +11,7 @@ export type SessionUser = {
 };
 
 const COOKIE_NAME = "ai-session";
+const ANONYMOUS_EMAIL = "anonymous@ai-designer.local";
 
 function getSecret() {
   const raw = process.env.APP_SECRET || "dev-secret-change-in-production";
@@ -43,24 +45,46 @@ export async function createSession(user: SessionUser) {
   return token;
 }
 
-export async function getSession(): Promise<SessionUser | null> {
-  const c = await cookies();
-  const token = c.get(COOKIE_NAME)?.value;
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, getSecret());
-    return {
-      id: String(payload.id),
-      email: String(payload.email),
-      name: payload.name ? String(payload.name) : null,
-      role: payload.role === "ADMIN" ? "ADMIN" : "USER",
-    };
-  } catch {
-    return null;
-  }
-}
-
 export async function clearSession() {
   const c = await cookies();
   c.set(COOKIE_NAME, "", { path: "/", maxAge: 0 });
+}
+
+async function getAnonymousUser(): Promise<SessionUser> {
+  let user = await prisma.user.findUnique({ where: { email: ANONYMOUS_EMAIL } });
+  if (!user) {
+    user = await prisma.user.create({
+      data: {
+        email: ANONYMOUS_EMAIL,
+        name: "Гость",
+        password: await hashPassword("anonymous"),
+        role: "ADMIN",
+      },
+    });
+  }
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+  };
+}
+
+export async function getSession(): Promise<SessionUser> {
+  const c = await cookies();
+  const token = c.get(COOKIE_NAME)?.value;
+  if (token) {
+    try {
+      const { payload } = await jwtVerify(token, getSecret());
+      return {
+        id: String(payload.id),
+        email: String(payload.email),
+        name: payload.name ? String(payload.name) : null,
+        role: payload.role === "ADMIN" ? "ADMIN" : "USER",
+      };
+    } catch {
+      // ignore invalid token
+    }
+  }
+  return getAnonymousUser();
 }

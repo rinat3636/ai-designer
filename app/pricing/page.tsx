@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -44,7 +45,7 @@ export default async function PricingPage() {
             </CardContent>
             <CardFooter>
               <Button variant={plan.priceMonthly === 0 ? "default" : "outline"} className="w-full" asChild>
-                <a href="/register">{plan.priceMonthly === 0 ? "Начать бесплатно" : "Выбрать"}</a>
+                <Link href="/create">{plan.priceMonthly === 0 ? "Начать бесплатно" : "Выбрать"}</Link>
               </Button>
             </CardFooter>
           </Card>

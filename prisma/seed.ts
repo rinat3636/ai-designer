@@ -10,8 +10,8 @@ async function main() {
       name: "Бесплатный",
       description: "Для пробных генераций",
       priceMonthly: 0,
-      monthlyLimit: 5,
-      features: ["5 генераций в месяц", "Базовые шаблоны", "Стандартная очередь"],
+      monthlyLimit: 0,
+      features: ["Безлимитные генерации", "Базовые шаблоны", "Стандартная очередь"],
       displayOrder: 0,
     },
     {
