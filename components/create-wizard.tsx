@@ -46,6 +46,14 @@ function extractSize(text: string): string {
 }
 
 const UPLOAD_TEMPLATE_ID = "upload";
+const WORKSPACE_STORAGE_KEY = "ai-designer-workspace";
+const SCALE_TARGETS: { label: string; match: RegExp }[] = [
+  { label: "Баннер", match: /баннер|banner|hero/i },
+  { label: "Визитка", match: /визитк|business/i },
+  { label: "Пост", match: /пост|post/i },
+  { label: "Stories", match: /stories|сторис/i },
+  { label: "Листовка", match: /листовк|флаер|flyer/i },
+];
 const UPLOAD_TEMPLATE: Template = {
   id: UPLOAD_TEMPLATE_ID,
   slug: "custom-upload",
@@ -105,9 +113,12 @@ export function CreateWizard({
   const [dragOver, setDragOver] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [lastRecommendation, setLastRecommendation] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectionHistoryRef = useRef<GenerationImage[]>([]);
+  const restoredRef = useRef(false);
+  const recommendedForRef = useRef<string>("");
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -125,6 +136,82 @@ export function CreateWizard({
     }
     return map;
   }, [templates]);
+
+  // Autosave: restore the last session so an accidentally closed tab
+  // continues from where the user left off.
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    try {
+      const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved.generationId) {
+        fetch(`/api/projects/${saved.generationId}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((json) => {
+            if (json?.generation) {
+              setGeneration(json.generation);
+              setMode("result");
+              recommendedForRef.current = json.generation.id;
+              toast("Продолжаем с последнего места");
+            }
+          })
+          .catch(() => {});
+      } else if (["interview", "upload-edit", "concepts"].includes(saved.mode)) {
+        setSelectedTemplateId(saved.selectedTemplateId || "");
+        setMessages(saved.messages || []);
+        setCurrentData(saved.currentData || {});
+        setConcepts(saved.concepts || []);
+        setAnalysis(saved.analysis || "");
+        setMode(saved.mode);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    try {
+      localStorage.setItem(
+        WORKSPACE_STORAGE_KEY,
+        JSON.stringify({
+          mode,
+          selectedTemplateId,
+          messages,
+          currentData,
+          concepts,
+          analysis,
+          generationId: generation?.id || null,
+        })
+      );
+    } catch {}
+  }, [mode, selectedTemplateId, messages, currentData, concepts, analysis, generation]);
+
+  // Proactive review: after a generation the assistant analyzes the result
+  // and suggests improvements the user can apply with one click.
+  useEffect(() => {
+    if (mode !== "result" || !generation || recommendedForRef.current === generation.id) return;
+    recommendedForRef.current = generation.id;
+    fetch(`/api/projects/${generation.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction:
+          "Проанализируй текущий дизайн как эксперт и дай максимум 2 конкретные рекомендации по улучшению (например: увеличить заголовок, перенести QR-код). Коротко, списком. Это вопрос-консультация, ничего не меняй.",
+        selectedImageUrl: generation.images?.[0]?.url,
+        messages: [],
+        count: 1,
+      }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.assistantMessage) {
+          setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
+          setLastRecommendation(json.assistantMessage);
+        }
+      })
+      .catch(() => {});
+  }, [mode, generation]);
 
   useEffect(() => {
     if (selectedTemplateId && mode === "select") {
@@ -588,6 +675,56 @@ export function CreateWizard({
     sendEditInstruction("Сделай похожий вариант с небольшими отличиями", true);
   }
 
+  function applyRecommendation() {
+    if (!lastRecommendation) return;
+    setLastRecommendation("");
+    sendEditInstruction(`Примени эти рекомендации к текущему дизайну, сохранив всё остальное: ${lastRecommendation}`, true);
+  }
+
+  // One-click scaling: create a banner/business card/post/stories/flyer
+  // in the same style as the finished design.
+  async function handleScaleTo(target: Template) {
+    if (!generation || !selectedResultImage) return;
+    const brief = buildBrief();
+    const concept: Concept =
+      selectedConcept ||
+      (generation.concept as unknown as Concept | null) || {
+        name: "В том же стиле",
+        description: "Повторить стиль готового дизайна в новом формате",
+        palette: [],
+        recommendations: ["Сохранить стиль, цвета и типографику референса"],
+      };
+    setLoading(true);
+    setError("");
+    setMode("generating");
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateId: target.id,
+          brief,
+          concept,
+          data: { ...(currentData.data || {}) },
+          referenceImageUrls: [selectedResultImage.url],
+          editNote: `Создай ${target.name} в том же стиле, что и референс: те же цвета, шрифты и характер.`,
+          count: 1,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+      setSelectedTemplateId(target.id);
+      setGeneration(json.generation);
+      setMode("result");
+      toast.success(`${target.name} в том же стиле готов!`);
+    } catch (e: any) {
+      setError(e.message || "Ошибка генерации");
+      setMode("result");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function handleEditFocus() {
     chatInputRef.current?.focus();
     chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
@@ -811,6 +948,13 @@ export function CreateWizard({
               </div>
             </div>
           ))}
+          {isResult && lastRecommendation && !loading && (
+            <div className="flex justify-start">
+              <Button size="sm" onClick={applyRecommendation}>
+                <Wand2 className="mr-1 size-4" /> Исправить
+              </Button>
+            </div>
+          )}
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Wand2 className="size-4 animate-pulse" />
@@ -1052,6 +1196,12 @@ export function CreateWizard({
 
   function ResultWorkspace() {
     if (!generation) return null;
+    const scaleTargets = SCALE_TARGETS.flatMap(({ label, match }) => {
+      const t = templates.find(
+        (tpl) => tpl.id !== generation.templateId && (match.test(tpl.name) || match.test(tpl.slug))
+      );
+      return t ? [{ label, template: t }] : [];
+    });
     const selectedIndex = resultImages.findIndex((i) => i.id === selectedResultImage?.id);
     const compareImage =
       selectionHistoryRef.current[selectionHistoryRef.current.length - 1] ||
@@ -1144,6 +1294,27 @@ export function CreateWizard({
                 </Button>
               </CardContent>
             </Card>
+
+            {scaleTargets.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Создать в этом же стиле</CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
+                  {scaleTargets.map(({ label, template: t }) => (
+                    <Button
+                      key={t.id}
+                      variant="outline"
+                      className="h-12 w-full text-base sm:h-10 sm:text-sm"
+                      disabled={loading || !selectedResultImage}
+                      onClick={() => handleScaleTo(t)}
+                    >
+                      <Plus className="mr-2 size-5 sm:size-4" /> {label}
+                    </Button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader>

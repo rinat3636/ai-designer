@@ -746,6 +746,7 @@ type EditParseResult = {
   editSummary: string;
   responseToUser: string;
   clarificationQuestion?: string | null;
+  textReplacements?: { from: string; to: string }[];
 };
 
 async function parseEditInstruction(
@@ -763,14 +764,16 @@ First classify the latest user message into an intent:
 Additional rules:
 1. Use the full conversation history; references like "он", "этот вариант", "тот телефон" refer to the currently selected design and earlier messages.
 2. If the user replies with a number/short phrase ("3", "третий", "третий вариант"), resolve it using the assistant's previous multiple-choice options and act on it.
-3. Only ask a clarification question when the request is truly impossible to infer. Prefer to make a reasonable professional design choice and proceed rather than asking.
+3. Only ask a clarification question when the request is truly impossible to infer. Prefer to make a reasonable professional design choice and proceed rather than asking. For very vague aesthetic requests ("сделай красиво"), either proceed with a concrete professional improvement or offer 2-3 numbered concrete options in the clarification question.
+4. If the user only changes literal text content that is visible in the design (phone number, website, address, company name, a label), also output textReplacements — exact old visible string → exact new string — so the change can be applied without regenerating the design.
 
 Output valid JSON with these fields:
 - intent: "edit", "chat" or "revert".
 - updatedData: (for edit) object with the same keys as the current data but updated values. Set a value to "" to remove it. Add new keys only if they naturally fit the request (phone, address, qrUrl, website, discount, etc.).
 - editSummary: (for edit) a concise English instruction for the SVG generator describing the concrete change to apply.
 - responseToUser: a short, friendly Russian reply — for chat, the full helpful answer; for edit, a brief acknowledgement of what you are changing.
-- clarificationQuestion: null if the request is clear, otherwise one short Russian question. If multiple-choice, keep the same numbering from the previous assistant message.`;
+- clarificationQuestion: null if the request is clear, otherwise one short Russian question. If multiple-choice, keep the same numbering from the previous assistant message.
+- textReplacements: (optional, only for pure text swaps) array of { "from": "exact old visible text", "to": "new text" }.`;
 
   const history = messages
     .slice(-10)
@@ -802,12 +805,21 @@ Output valid JSON with these fields:
     }
     const intent =
       parsed.intent === "chat" || parsed.intent === "revert" ? parsed.intent : "edit";
+    const textReplacements = Array.isArray(parsed.textReplacements)
+      ? parsed.textReplacements
+          .filter((r: unknown): r is { from: string; to: string } => {
+            const rep = r as { from?: unknown; to?: unknown };
+            return typeof rep?.from === "string" && rep.from.length > 0 && typeof rep?.to === "string";
+          })
+          .map((r: { from: string; to: string }) => ({ from: r.from, to: r.to }))
+      : undefined;
     return {
       intent,
       updatedData,
       editSummary: String(parsed.editSummary || instruction),
       responseToUser: String(parsed.responseToUser || "Готово."),
       clarificationQuestion: parsed.clarificationQuestion || undefined,
+      textReplacements,
     };
   } catch {
     return fallback;
@@ -834,6 +846,26 @@ export async function editDesigns(
   }
   if (parsed.clarificationQuestion) {
     return [{ svg: "", label: "", clarificationQuestion: parsed.clarificationQuestion }];
+  }
+
+  // Pure text swaps (phone, website, address, name) are applied directly to the
+  // source SVG without regenerating the whole design.
+  if (sourceSvg && parsed.textReplacements?.length) {
+    const escaped = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    let updated = sourceSvg;
+    let applied = 0;
+    for (const { from, to } of parsed.textReplacements) {
+      for (const [needle, replacement] of [[from, to], [escaped(from), escaped(to)]] as const) {
+        if (needle && updated.includes(needle)) {
+          updated = updated.split(needle).join(replacement);
+          applied++;
+          break;
+        }
+      }
+    }
+    if (applied === parsed.textReplacements.length) {
+      return [{ svg: updated, label: "Точечная правка текста" }];
+    }
   }
 
   const updatedInput: DesignGenerationInput = {
@@ -988,6 +1020,10 @@ ${DESIGN_QUALITY_RULES}`;
     if (!svg.includes("xmlns=")) {
       svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
     }
+    if (!passesQualityCheck(svg)) {
+      console.warn(`Design #${variantIndex + 1} failed quality check`);
+      return null;
+    }
     return svg;
   }
 
@@ -996,6 +1032,18 @@ ${DESIGN_QUALITY_RULES}`;
   if (first) return first;
   console.warn(`Retrying generation for variant ${variantIndex + 1}`);
   return attempt();
+}
+
+function passesQualityCheck(svg: string): boolean {
+  if (!/viewBox\s*=\s*"[\d\s.,-]+"/i.test(svg)) return false;
+  if (/\bNaN\b|undefined/.test(svg)) return false;
+  for (const tag of ["g", "defs", "text", "tspan", "svg"]) {
+    const open = (svg.match(new RegExp(`<${tag}[\\s>]`, "gi")) || []).length;
+    const close = (svg.match(new RegExp(`</${tag}>`, "gi")) || []).length;
+    const selfClosed = (svg.match(new RegExp(`<${tag}[^>]*/>`, "gi")) || []).length;
+    if (open !== close + selfClosed) return false;
+  }
+  return true;
 }
 
 const DESIGN_QUALITY_RULES = `DESIGN QUALITY RULES (mandatory):
