@@ -345,10 +345,11 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { projectId, message = "", files = [] } = body as {
+    const { projectId, message = "", files = [], templateId } = body as {
       projectId?: string;
       message?: string;
       files?: string[];
+      templateId?: string;
     };
     let text = (message || "").trim();
     const uploadedFiles = Array.isArray(files) ? (files as string[]) : [];
@@ -410,10 +411,13 @@ export async function POST(request: NextRequest) {
 
     // New design from text
     const activeTemplates = await prisma.template.findMany({ where: { isActive: true } });
-    const resolution = await resolveTemplateFromText(
-      text,
-      activeTemplates.map((t) => ({ id: t.id, slug: t.slug, name: t.name, category: t.category, description: t.description }))
-    );
+    const requestedTemplate = templateId ? activeTemplates.find((t) => t.id === templateId) : undefined;
+    const resolution = requestedTemplate
+      ? { templateId: requestedTemplate.id, slug: requestedTemplate.slug, size: null }
+      : await resolveTemplateFromText(
+          text,
+          activeTemplates.map((t) => ({ id: t.id, slug: t.slug, name: t.name, category: t.category, description: t.description }))
+        );
     if (!resolution.templateId) {
       return NextResponse.json({
         message:
