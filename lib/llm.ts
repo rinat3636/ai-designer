@@ -1,7 +1,6 @@
 import fs from "fs";
 import path from "path";
 import { prisma } from "@/lib/prisma";
-import { placeholderSVG } from "./design";
 import { promptToPngDataUrl } from "./prompt-image";
 
 export type Concept = {
@@ -67,6 +66,13 @@ function getApiConfig() {
   return { apiKey, baseURL, model };
 }
 
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 1500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function callChatCompletionRaw(
   systemPrompt: string,
   messages: ChatMessage[],
@@ -75,10 +81,36 @@ async function callChatCompletionRaw(
   signal?: AbortSignal,
   temperature?: number
 ): Promise<string | null> {
-  const cfg = getApiConfig();
-  if (!cfg) return null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (signal?.aborted) return null;
+    if (attempt > 0) {
+      await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+      if (signal?.aborted) return null;
+      console.warn(`Chat completion retry ${attempt + 1}/${MAX_ATTEMPTS}`);
+    }
+    const result = await callChatCompletionOnce(systemPrompt, messages, maxTokens, jsonMode, signal, temperature);
+    if (result.ok) return result.text;
+    if (!result.retryable) return null;
+  }
+  return null;
+}
 
-  const timeoutMs = 115000;
+type ChatCompletionAttempt =
+  | { ok: true; text: string | null; retryable?: undefined }
+  | { ok: false; retryable: boolean; text?: undefined };
+
+async function callChatCompletionOnce(
+  systemPrompt: string,
+  messages: ChatMessage[],
+  maxTokens = 4096,
+  jsonMode = false,
+  signal?: AbortSignal,
+  temperature?: number
+): Promise<ChatCompletionAttempt> {
+  const cfg = getApiConfig();
+  if (!cfg) return { ok: false, retryable: false };
+
+  const timeoutMs = 90000;
   const timeoutController = new AbortController();
   const timeoutId = setTimeout(() => timeoutController.abort("timeout"), timeoutMs);
 
@@ -117,16 +149,18 @@ async function callChatCompletionRaw(
     if (!res.ok) {
       const text = await res.text();
       console.error("Chat completion error", res.status, text.slice(0, 500));
-      return null;
+      const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
+      return { ok: false, retryable };
     }
 
     const data = (await res.json()) as ChatCompletionResponse;
     const choice = data.choices?.[0];
     console.log("Chat completion usage:", JSON.stringify(data.usage), "finish_reason:", choice?.finish_reason);
-    return choice?.message?.content?.trim() || null;
+    return { ok: true, text: choice?.message?.content?.trim() || null };
   } catch (e) {
     console.error("callChatCompletionRaw error", e);
-    return null;
+    // Network errors and timeouts are retryable; an external abort is not.
+    return { ok: false, retryable: !signal?.aborted };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -581,6 +615,92 @@ function fallbackConcepts(): ConceptGenerationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Natural-language template resolution
+// ---------------------------------------------------------------------------
+
+export type TemplateCandidate = {
+  id: string;
+  slug: string;
+  name: string;
+  category: string;
+  description?: string | null;
+};
+
+export type TemplateResolution = {
+  templateId: string | null;
+  slug: string | null;
+  size: string | null;
+};
+
+const TEMPLATE_KEYWORDS: [RegExp, string][] = [
+  [/stories|сторис|сториз|история|1080\s?[x×]\s?1920/i, "social-stories"],
+  [/карусел/i, "social-carousel"],
+  [/пост|post/i, "social-post"],
+  [/обложк.*(сообществ|групп|вк|vk)|сообществ/i, "social-community-cover"],
+  [/обложк.*магазин|шапк.*магазин/i, "marketplace-shop-cover"],
+  [/инфографик/i, "marketplace-infographic"],
+  [/карточк.*товар|товарн.*карточк|маркетплейс|wildberries|ozon|вайлдберриз|озон/i, "marketplace-product-card"],
+  [/промо.?баннер.*(маркетплейс|магазин)/i, "marketplace-promo-banner"],
+  [/билборд|billboard|наружн/i, "ad-billboard"],
+  [/постер|плакат|афиш/i, "ad-poster"],
+  [/визитк/i, "branding-business-card"],
+  [/сертификат.*подароч|подарочн.*сертификат/i, "branding-gift-certificate"],
+  [/сертификат|диплом|грамот/i, "branding-certificate"],
+  [/флаер|листовк/i, "branding-flyer"],
+  [/логотип|лого\b|logo/i, "branding-logo"],
+  [/иконк|icons/i, "site-icons"],
+  [/иллюстрац/i, "site-illustrations"],
+  [/hero|геро|главн.*баннер.*сайт|шапк.*сайт/i, "site-hero-banner"],
+  [/баннер.*сайт|сайт.*баннер/i, "site-promo-banner"],
+  [/баннер|banner|реклам/i, "ad-banner"],
+];
+
+export async function resolveTemplateFromText(
+  message: string,
+  templates: TemplateCandidate[]
+): Promise<TemplateResolution> {
+  const size = extractSizeFromText(message) || null;
+
+  for (const [pattern, slug] of TEMPLATE_KEYWORDS) {
+    if (pattern.test(message)) {
+      const template = templates.find((t) => t.slug === slug);
+      if (template) return { templateId: template.id, slug: template.slug, size };
+    }
+  }
+
+  const cfg = getApiConfig();
+  if (!cfg) return { templateId: null, slug: null, size };
+
+  const list = templates
+    .map((t) => `- ${t.slug}: ${t.name} (${t.category})${t.description ? ` — ${t.description}` : ""}`)
+    .join("\n");
+
+  const system = `Ты определяешь тип дизайна по сообщению клиента. Доступные шаблоны:
+${list}
+
+Верни ТОЛЬКО JSON: {"slug": "точный slug из списка или null, если не уверен", "size": "ШИРИНАxВЫСОТА или null"}`;
+
+  const text = await callChatCompletion(system, `Сообщение клиента: "${message}"`, 256, true, undefined, 0);
+  if (!text) return { templateId: null, slug: null, size };
+
+  try {
+    const jsonStr = extractJson(text);
+    if (!jsonStr) return { templateId: null, slug: null, size };
+    const parsed = JSON.parse(jsonStr);
+    const slug = typeof parsed.slug === "string" ? parsed.slug : null;
+    const template = slug ? templates.find((t) => t.slug === slug) : undefined;
+    const parsedSize = typeof parsed.size === "string" ? extractSizeFromText(parsed.size) : "";
+    return {
+      templateId: template?.id || null,
+      slug: template?.slug || null,
+      size: size || parsedSize || null,
+    };
+  } catch {
+    return { templateId: null, slug: null, size };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Image / design generation via SVG output
 // ---------------------------------------------------------------------------
 
@@ -593,6 +713,7 @@ export type DesignGenerationInput = {
   editNote?: string;
   sourceSvg?: string;
   referenceImages?: string[];
+  referenceStyle?: string;
 };
 
 export async function generateDesigns(
@@ -603,19 +724,20 @@ export async function generateDesigns(
   if (signal?.aborted) return [];
 
   const variants = Array.from({ length: count }, (_, i) => i);
-  const promises = variants.map(async (i) => {
-    if (signal?.aborted) return { svg: placeholderSVG(input, i), label: `Вариант ${i + 1}`, metadata: { aborted: true } };
+  const promises = variants.map(async (i): Promise<{ svg: string; label: string; metadata?: any } | null> => {
+    if (signal?.aborted) return null;
     try {
       const svg = await generateOneSvg(input, i);
       if (svg) return { svg, label: `Вариант ${i + 1}` };
-      return { svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` };
+      return null;
     } catch (e) {
       console.error(`Design variant ${i} error`, e);
-      return { svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` };
+      return null;
     }
   });
 
-  return Promise.all(promises);
+  const results = await Promise.all(promises);
+  return results.filter((r): r is { svg: string; label: string; metadata?: any } => r !== null);
 }
 
 type EditParseResult = {
@@ -709,10 +831,32 @@ export async function editDesigns(
   return generateDesigns(updatedInput, count, signal);
 }
 
-export async function analyzeImage(imageUrl: string): Promise<{ text: string; description: string; colors: string[]; elements: string[] }> {
+export type ImageAnalysis = {
+  text: string;
+  description: string;
+  colors: string[];
+  elements: string[];
+  style: string;
+  palette: string[];
+  composition: string;
+  typography: string;
+};
+
+const EMPTY_IMAGE_ANALYSIS: ImageAnalysis = {
+  text: "",
+  description: "",
+  colors: [],
+  elements: [],
+  style: "",
+  palette: [],
+  composition: "",
+  typography: "",
+};
+
+export async function analyzeImage(imageUrl: string): Promise<ImageAnalysis> {
   const b64 = await imageUrlToBase64(imageUrl);
   if (!b64) {
-    return { text: "", description: "", colors: [], elements: [] };
+    return { ...EMPTY_IMAGE_ANALYSIS };
   }
 
   const system = `You are analyzing a design image. Extract the following and return valid JSON only:
@@ -720,21 +864,24 @@ export async function analyzeImage(imageUrl: string): Promise<{ text: string; de
   "text": "all visible text exactly as it appears, separated by \\n",
   "description": "short description of layout, style and main visual elements",
   "colors": ["#hex", "#hex"],
-  "elements": ["element 1", "element 2"]
+  "elements": ["element 1", "element 2"],
+  "style": "overall design style in a few words (e.g. minimalist, retro, corporate, playful)",
+  "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"],
+  "composition": "short description of the layout structure: grid, alignment, focal point, whitespace",
+  "typography": "short description of the fonts: serif/sans-serif, weight, case, mood"
 }
 Be precise with text. Do not invent text that is not visible.`;
 
   const content: ChatContentPart[] = [
-    { type: "text", text: "Extract all visible text, dominant colors, and describe the design. Return JSON only." },
+    { type: "text", text: "Extract all visible text, dominant colors, style, palette, composition and typography, and describe the design. Return JSON only." },
     { type: "image_url", image_url: { url: b64 } },
   ];
 
   const text = await callChatCompletion(system, content, 2048, true, undefined, 0);
-  const empty = { text: "", description: "", colors: [], elements: [] };
-  if (!text) return empty;
+  if (!text) return { ...EMPTY_IMAGE_ANALYSIS };
 
   const jsonStr = extractJson(text);
-  if (!jsonStr) return empty;
+  if (!jsonStr) return { ...EMPTY_IMAGE_ANALYSIS };
 
   try {
     const parsed = JSON.parse(jsonStr);
@@ -743,9 +890,13 @@ Be precise with text. Do not invent text that is not visible.`;
       description: String(parsed.description || ""),
       colors: Array.isArray(parsed.colors) ? parsed.colors.map(String) : [],
       elements: Array.isArray(parsed.elements) ? parsed.elements.map(String) : [],
+      style: String(parsed.style || ""),
+      palette: Array.isArray(parsed.palette) ? parsed.palette.map(String) : [],
+      composition: String(parsed.composition || ""),
+      typography: String(parsed.typography || ""),
     };
   } catch {
-    return empty;
+    return { ...EMPTY_IMAGE_ANALYSIS };
   }
 }
 
@@ -782,7 +933,9 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
 
   const system = isEdit
     ? `You are a precise SVG editor. The user provides a design and a single change request. Output ONLY the full updated SVG. Do not redesign, do not add/remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so. Keep the same viewBox. Output raw SVG 1.1 only, no markdown, no comments.`
-    : `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster. Balanced, readable, high contrast, professional.`;
+    : `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster.
+
+${DESIGN_QUALITY_RULES}`;
 
   const userPrompt = isEdit ? buildEditPrompt(input) : buildDesignPrompt(input);
 
@@ -828,6 +981,20 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
   console.warn(`Retrying generation for variant ${variantIndex + 1}`);
   return attempt();
 }
+
+const DESIGN_QUALITY_RULES = `DESIGN QUALITY RULES (mandatory):
+1. Composition: logical and balanced layout, no chaotic placement, no large empty zones, no overlapping elements.
+2. Visual hierarchy: headline \u2192 image/offer \u2192 CTA/button \u2192 contacts \u2192 logo. The most important element must dominate.
+3. Alignment: consistent spacing, precise centering, follow an invisible modular grid.
+4. Safe zones: keep all text and important elements inside a safe area of at least 4% of width/height from every edge.
+5. Balance text, imagery and whitespace \u2014 generous breathing room, minimalist and modern.
+6. Typography: modern fonts, readable sizes, comfortable line height and letter spacing; never squeeze text.
+7. Color harmony: use the provided palette (or a niche-appropriate palette); limit to 2-4 dominant colors.
+8. Contrast: all text must be clearly readable \u2014 never light-on-light or dark-on-dark.
+9. Element sizing: logo, phone, website, QR code, buttons and images sized appropriately for their importance.
+10. Contacts placed logically (bottom or corner), visible but not distracting.
+11. Format-specific composition: logo \u2014 clean mark; banner \u2014 big headline; product card \u2014 product first; stories \u2014 vertical flow; business card \u2014 compact info blocks; certificate \u2014 formal symmetric layout.
+12. SELF-CHECK before output: verify alignment, readability, no overlaps, safe zones respected, professional modern look. Fix any issue, then output the SVG.`;
 
 const LABELS: Record<string, string> = {
   headline: "Headline",
@@ -880,9 +1047,13 @@ function buildDesignPrompt(input: DesignGenerationInput): string {
     ? "certificate"
     : "marketing graphic";
 
+  const referenceNote = input.referenceStyle
+    ? `\nReference style (match the mood, palette and typography of the user's reference, but do NOT copy its exact layout): ${trunc(input.referenceStyle, 400)}`
+    : "";
+
   return `Create a ${role} for "${brief.companyName || template.name}".
 Business: ${trunc(brief.businessDesc, 80) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 50)}. Palette: ${concept.palette.join(", ")}.
-Template: ${template.name}.${designHint}${transparentNote}
+Template: ${template.name}.${designHint}${transparentNote}${referenceNote}
 viewBox="${viewBox}" (${w}×${h}).${textBlocks ? "\n" + textBlocks : ""}
 Output raw SVG only.`;
 }

@@ -151,7 +151,10 @@ export async function POST(
 
     if (designs.length === 0 || !designs[0].svg) {
       await prisma.generation.update({ where: { id }, data: { status: "completed" } });
-      return NextResponse.json({ error: "Edit failed" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Сервис генерации временно перегружен. Попробуйте ещё раз." },
+        { status: 503 }
+      );
     }
 
     const createdImages = [];

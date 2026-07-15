@@ -244,6 +244,64 @@ export function CreateWizard({
 
   async function sendMessage() {
     const text = inputText.trim();
+
+    // On the first screen, resolve the template from free-form text:
+    // "сделай Stories для кофейни" selects the right template automatically.
+    if (mode === "select") {
+      if (!text) return;
+      setLoading(true);
+      setError("");
+      try {
+        const res = await fetch("/api/resolve-template", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text }),
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error);
+        const resolved = templates.find((t) => t.id === json.templateId);
+        if (!resolved) {
+          setError("Не удалось определить тип дизайна. Выберите его из списка или опишите точнее.");
+          return;
+        }
+
+        const nextData: Record<string, any> = json.size
+          ? { size: json.size, data: { size: json.size } }
+          : {};
+        const userMessage: ChatMessage = { role: "user", content: text };
+        setSelectedTemplateId(resolved.id);
+        setMode("interview");
+        setCurrentData(nextData);
+        setMessages([userMessage]);
+        setInputText("");
+
+        const interviewRes = await fetch("/api/interview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            templateId: resolved.id,
+            messages: [userMessage],
+            currentData: nextData,
+          }),
+        });
+        const interviewJson = await interviewRes.json();
+        if (!interviewRes.ok) throw new Error(interviewJson.error);
+
+        setCurrentData((prev) => ({ ...prev, ...(interviewJson.extractedData || {}) }));
+        setMessages((prev) => [...prev, { role: "assistant", content: interviewJson.message }]);
+        if (interviewJson.done) {
+          setAnalysis(interviewJson.analysis || "");
+          setConcepts(interviewJson.concepts || []);
+          setMode("concepts");
+        }
+      } catch (e: any) {
+        setError(e.message || "Ошибка определения шаблона");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     if ((!text && selectedImages.length === 0) || !template) return;
 
     // In the upload-edit mode, always edit the uploaded image directly.
@@ -603,7 +661,7 @@ export function CreateWizard({
   const activeSend = isResult ? sendEdit : sendMessage;
   const inputPlaceholder =
     mode === "select"
-      ? "Сначала выберите тип дизайна…"
+      ? "Опишите, что нужно, например: «Сделай Stories для кофейни»…"
       : mode === "upload-edit"
       ? "Загрузите макет и напишите правку, например: «Сделай фон красным»…"
       : isResult
@@ -667,6 +725,11 @@ export function CreateWizard({
         </div>
 
         <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
+          {activeMessages.length === 0 && mode === "select" && (
+            <div className="text-center text-sm text-muted-foreground">
+              Напишите, что нужно, например: «Сделай Stories 1080x1920 для кофейни» — и я сам подберу шаблон. Или выберите тип дизайна справа.
+            </div>
+          )}
           {activeMessages.length === 0 && mode === "upload-edit" && (
             <div className="text-center text-sm text-muted-foreground">
               Загрузите макет (логотип, сертификат и т.д.) и напишите, что изменить, например: «Сделай фон красным».
@@ -747,11 +810,11 @@ export function CreateWizard({
               rows={1}
               className="min-h-[44px] flex-1 resize-none text-base md:text-sm"
               onKeyDown={handleChatKeyDown}
-              disabled={mode === "select" || loading}
+              disabled={loading}
             />
             <Button
               type="button"
-              disabled={mode === "select" || loading || (!activeInput.trim() && activeImages.length === 0)}
+              disabled={loading || (!activeInput.trim() && activeImages.length === 0)}
               onClick={activeSend}
               className="h-11 shrink-0 px-4 text-base md:h-10 md:px-3 md:text-sm"
             >

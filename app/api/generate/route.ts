@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
     // elements so the generator can reproduce the design faithfully.
     let enrichedBrief = brief as Brief;
     let enrichedData = (data || {}) as Record<string, string>;
+    let referenceStyle = "";
     if (editNote && !sourceSvg && nonSvgRefs.length > 0) {
       try {
         const analysis = await analyzeImage(nonSvgRefs[0]);
@@ -61,6 +62,27 @@ export async function POST(request: NextRequest) {
         }
       } catch (e) {
         console.warn("Image analysis failed", e);
+      }
+    } else if (!editNote && nonSvgRefs.length > 0) {
+      // Reference image for a fresh generation: extract style, palette,
+      // composition and typography so the model matches the reference mood.
+      try {
+        const analysis = await analyzeImage(nonSvgRefs[0]);
+        const styleParts: string[] = [];
+        if (analysis.style) styleParts.push(`style: ${analysis.style}`);
+        if (analysis.palette.length) styleParts.push(`palette: ${analysis.palette.join(", ")}`);
+        if (analysis.composition) styleParts.push(`composition: ${analysis.composition}`);
+        if (analysis.typography) styleParts.push(`typography: ${analysis.typography}`);
+        referenceStyle = styleParts.join("; ");
+        if (analysis.style && !enrichedBrief.style?.trim()) {
+          enrichedBrief = { ...enrichedBrief, style: analysis.style };
+        }
+        const refColors = analysis.palette.length ? analysis.palette : analysis.colors;
+        if (refColors.length && !enrichedBrief.colors?.length) {
+          enrichedBrief = { ...enrichedBrief, colors: refColors };
+        }
+      } catch (e) {
+        console.warn("Reference analysis failed", e);
       }
     }
 
@@ -146,6 +168,7 @@ export async function POST(request: NextRequest) {
         editNote: editNote || undefined,
         sourceSvg: sourceSvg || undefined,
         referenceImages: nonSvgRefs,
+        referenceStyle: referenceStyle || undefined,
       },
       Math.max(1, Math.min(2, Number(count) || 1))
     );
@@ -155,7 +178,10 @@ export async function POST(request: NextRequest) {
         where: { id: generation.id },
         data: { status: "failed" },
       });
-      return NextResponse.json({ error: "Generation failed" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Сервис генерации временно перегружен. Попробуйте ещё раз." },
+        { status: 503 }
+      );
     }
 
     for (let i = 0; i < designs.length; i++) {
