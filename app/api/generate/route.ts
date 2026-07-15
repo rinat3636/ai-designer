@@ -5,7 +5,7 @@ import { generateDesigns, type Brief, type Concept } from "@/lib/llm";
 import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
 import { saveSvg } from "@/lib/storage";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   const user = await getSession();

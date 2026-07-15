@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { placeholderSVG } from "./design";
+import { promptToPngDataUrl } from "./prompt-image";
 
 export type Concept = {
   name: string;
@@ -68,10 +69,23 @@ async function callChatCompletionRaw(
   systemPrompt: string,
   messages: ChatMessage[],
   maxTokens = 4096,
-  jsonMode = false
+  jsonMode = false,
+  signal?: AbortSignal
 ): Promise<string | null> {
   const cfg = getApiConfig();
   if (!cfg) return null;
+
+  const timeoutMs = 115000;
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort("timeout"), timeoutMs);
+
+  let combinedSignal: AbortSignal | undefined = timeoutController.signal;
+  if (signal) {
+    const linked = new AbortController();
+    linked.signal.addEventListener("abort", () => timeoutController.abort(linked.signal.reason));
+    signal.addEventListener("abort", () => linked.abort(signal.reason));
+    combinedSignal = linked.signal;
+  }
 
   try {
     const body: any = {
@@ -91,6 +105,7 @@ async function callChatCompletionRaw(
         Authorization: `Bearer ${cfg.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: combinedSignal,
     });
 
     if (!res.ok) {
@@ -106,16 +121,19 @@ async function callChatCompletionRaw(
   } catch (e) {
     console.error("callChatCompletionRaw error", e);
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
 async function callChatCompletion(
   systemPrompt: string,
-  userPrompt: string,
+  userPrompt: string | ChatContentPart[],
   maxTokens = 4096,
-  jsonMode = false
+  jsonMode = false,
+  signal?: AbortSignal
 ): Promise<string | null> {
-  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode);
+  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal);
 }
 
 export async function chatInterview(
@@ -125,7 +143,11 @@ export async function chatInterview(
 ): Promise<InterviewResult> {
   const cfg = getApiConfig();
   if (!cfg) {
-    return heuristicInterview(template, currentData, messages);
+    return {
+      message: "Настройте API-ключ, чтобы продолжить.",
+      extractedData: currentData,
+      done: false,
+    };
   }
 
   const fields = Array.isArray(template.fields)
@@ -189,22 +211,87 @@ ${fields || "- нет специфических полей"}
 currentData на данный момент: ${JSON.stringify(currentData)}`;
 
   const text = await callChatCompletionRaw(systemPrompt, messages, 4096, true);
-  if (!text) return heuristicInterview(template, currentData, messages);
+  if (!text) return finishOrAsk(template, currentData, messages);
 
-  const result = parseInterviewResponse(text, currentData);
-  if (result) {
-    if (result.done) enrichConcepts(result);
-    return result;
-  }
+  const parsed = parseInterviewResponse(text, currentData);
+  const result = parsed ? await finishOrAsk(template, currentData, messages, parsed) : null;
+  if (result) return result;
 
   // If the model returned natural language, try to reformat via a second call.
   const repaired = await repairInterviewResponse(text, messages, template, currentData);
   if (repaired) {
-    if (repaired.done) enrichConcepts(repaired);
-    return repaired;
+    const repairedResult = await finishOrAsk(template, currentData, messages, repaired);
+    if (repairedResult) return repairedResult;
   }
 
-  return heuristicInterview(template, currentData, messages);
+  return finishOrAsk(template, currentData, messages);
+}
+
+function hasEnoughData(data: Record<string, any>): boolean {
+  return (
+    Boolean(data.businessDesc?.trim()) &&
+    (Boolean(data.companyName?.trim()) ||
+      Boolean(data.style?.trim()) ||
+      (Array.isArray(data.colors) && data.colors.length > 0) ||
+      Boolean(data.size))
+  );
+}
+
+async function finishOrAsk(
+  template: InterviewTemplate,
+  currentData: Record<string, any>,
+  messages: ChatMessage[],
+  candidate?: InterviewResult
+): Promise<InterviewResult> {
+  const data = { ...(candidate?.extractedData || currentData) };
+
+  // Try to pull the last user message into the data so we don't lose answers
+  // when the model fails to return proper JSON.
+  const lastUser = messages
+    .slice()
+    .reverse()
+    .find((m) => m.role === "user");
+  const lastUserText = extractTextFromMessage(lastUser);
+  if (lastUserText) {
+    const size = extractSizeFromText(lastUserText);
+    if (size) {
+      data.size = size;
+      if (!data.data || typeof data.data !== "object") data.data = {};
+      data.data.size = size;
+    }
+    const words = lastUserText.split(/\s+/).filter(Boolean);
+    if (!data.companyName && words.length <= 3 && words.some((w) => /^[A-ZА-ЯЁ]/.test(w))) {
+      data.companyName = lastUserText;
+    } else if (!data.businessDesc) {
+      data.businessDesc = lastUserText;
+    } else if (!data.style && !data.colors?.length) {
+      data.style = lastUserText;
+    } else if (!data.targetAudience) {
+      data.targetAudience = lastUserText;
+    }
+  }
+
+  if (!hasEnoughData(data)) {
+    return {
+      message:
+        candidate?.message?.trim() ||
+        "Принял. Расскажите, что считаете важным (сфера, название, стиль, цвета, размер, контакты), или напишите «готово», и я подготовлю концепции.",
+      extractedData: data,
+      done: false,
+    };
+  }
+
+  const brief = buildBrief(data);
+  const conceptResult = await generateConcepts(brief, template);
+  const result: InterviewResult = {
+    message: "Вот несколько концепций. Выберите подходящую:",
+    extractedData: data,
+    done: true,
+    analysis: conceptResult.analysis,
+    concepts: conceptResult.concepts,
+  };
+  enrichConcepts(result);
+  return result;
 }
 
 function extractJson(text: string): string | null {
@@ -348,75 +435,6 @@ function enrichConcepts(result: InterviewResult) {
       explanation: c.explanation || c.description,
     };
   });
-}
-
-async function heuristicInterview(
-  template: InterviewTemplate,
-  currentData: Record<string, any>,
-  messages: ChatMessage[]
-): Promise<InterviewResult> {
-  const lastUser = messages
-    .slice()
-    .reverse()
-    .find((m) => m.role === "user");
-  const lastUserText = extractTextFromMessage(lastUser);
-
-  // Try to understand the latest answer.
-  const updated = { ...currentData };
-  const size = extractSizeFromText(lastUserText);
-  if (size) {
-    updated.size = size;
-    if (!updated.data || typeof updated.data !== "object") updated.data = {};
-    updated.data.size = size;
-  }
-  if (lastUserText && !updated.businessDesc) {
-    updated.businessDesc = lastUserText;
-  } else if (lastUserText && !updated.companyName) {
-    updated.companyName = lastUserText;
-  } else if (lastUserText && !updated.targetAudience) {
-    updated.targetAudience = lastUserText;
-  } else if (lastUserText && !updated.style) {
-    updated.style = lastUserText;
-  }
-
-  if (!updated.businessDesc) {
-    return {
-      message: "Расскажите, пожалуйста, чем занимается ваша компания? Это поможет подобрать правильный стиль.",
-      extractedData: updated,
-      done: false,
-    };
-  }
-  if (!updated.companyName) {
-    return {
-      message: "Как называется компания?",
-      extractedData: updated,
-      done: false,
-    };
-  }
-  if (!updated.targetAudience) {
-    return {
-      message: "Кто ваша целевая аудитория?",
-      extractedData: updated,
-      done: false,
-    };
-  }
-  if (!updated.style && !updated.colors?.length) {
-    return {
-      message: "Есть ли пожелания по стилю или фирменным цветам?",
-      extractedData: updated,
-      done: false,
-    };
-  }
-
-  const brief = buildBrief(updated);
-  const conceptResult = await generateConcepts(brief, template);
-  return {
-    message: "Вот несколько концепций. Выберите подходящую:",
-    extractedData: updated,
-    done: true,
-    analysis: conceptResult.analysis,
-    concepts: conceptResult.concepts,
-  };
 }
 
 function extractSizeFromText(text: string): string {
@@ -674,21 +692,34 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
   const system = `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster. Balanced, readable, high contrast, professional.`;
 
   const userPrompt = buildDesignPrompt(input);
-  // Claude reasoning models need a large token budget: internal reasoning consumes
-  // most of the budget, so we request plenty of room for the actual SVG output.
-  const text = await callChatCompletion(system, userPrompt, 16000);
-  if (!text) return null;
 
-  const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/i);
-  if (!svgMatch) {
-    console.warn(`No SVG found in design response #${variantIndex + 1}`);
-    return null;
+  async function attempt(): Promise<string | null> {
+    let text: string | null = null;
+    if (process.env.USE_IMAGE_PROMPT === "true") {
+      const imageUrl = await promptToPngDataUrl(userPrompt, input.viewBox);
+      text = await callChatCompletion(system, [{ type: "image_url", image_url: { url: imageUrl } }], 12000);
+    } else {
+      text = await callChatCompletion(system, userPrompt, 12000);
+    }
+    if (!text) return null;
+
+    const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/i);
+    if (!svgMatch) {
+      console.warn(`No SVG found in design response #${variantIndex + 1}`);
+      return null;
+    }
+    let svg = svgMatch[0];
+    if (!svg.includes("xmlns=")) {
+      svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+    }
+    return svg;
   }
-  let svg = svgMatch[0];
-  if (!svg.includes("xmlns=")) {
-    svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
-  }
-  return svg;
+
+  // The upstream proxy occasionally returns 524/timeouts; retry once quickly.
+  const first = await attempt();
+  if (first) return first;
+  console.warn(`Retrying generation for variant ${variantIndex + 1}`);
+  return attempt();
 }
 
 const LABELS: Record<string, string> = {
