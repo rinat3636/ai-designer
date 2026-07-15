@@ -221,6 +221,25 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // Persist project memory so future dialogs don't re-ask known facts.
+    const memoryData = {
+      niche: (brief as Brief).businessDesc || undefined,
+      companyName: (brief as Brief).companyName || undefined,
+      style: (brief as Brief).style || (concept as Concept).name || undefined,
+      palette: ((concept as Concept).palette || []) as any,
+      contacts: {
+        phone: (data?.phone as string) || undefined,
+        website: (data?.website as string) || (brief as Brief).website || undefined,
+        address: (data?.address as string) || undefined,
+      } as any,
+      files: rawRefs as any,
+    };
+    await prisma.projectMemory.upsert({
+      where: { userId: user.id },
+      update: memoryData,
+      create: { userId: user.id, ...memoryData },
+    });
+
     await prisma.adminLog.create({
       data: {
         action: "generation",

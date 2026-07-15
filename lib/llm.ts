@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { promptToPngDataUrl } from "./prompt-image";
+import { applySvgOps, listElementIds, SvgOp } from "./svg-edit";
+import { injectQrCode } from "./qr";
 
 export type Concept = {
   name: string;
@@ -177,10 +179,19 @@ async function callChatCompletion(
   return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal, temperature);
 }
 
+export type ProjectMemorySnapshot = {
+  niche?: string | null;
+  companyName?: string | null;
+  style?: string | null;
+  palette?: unknown;
+  contacts?: unknown;
+};
+
 export async function chatInterview(
   messages: ChatMessage[],
   template: InterviewTemplate,
-  currentData: Record<string, any> = {}
+  currentData: Record<string, any> = {},
+  memory?: ProjectMemorySnapshot | null
 ): Promise<InterviewResult> {
   const cfg = getApiConfig();
   if (!cfg) {
@@ -249,7 +260,11 @@ ${fields || "- нет специфических полей"}
 
 ВАЖНО: JSON должен быть валидным. Сохраняй уже собранные данные из currentData. Если клиент дал информацию — обязательно перенеси её в extractedData. Не задавай похожие вопросы подряд.
 
-currentData на данный момент: ${JSON.stringify(currentData)}`;
+currentData на данный момент: ${JSON.stringify(currentData)}${
+    memory && (memory.niche || memory.companyName || memory.style)
+      ? `\n\nПамять о клиенте из прошлых проектов (используй её, НЕ задавай повторно вопросы о нише, названии, стиле и контактах, если они уже известны): ${JSON.stringify(memory)}`
+      : ""
+  }`;
 
   const text = await callChatCompletionRaw(systemPrompt, messages, 4096, true);
   if (!text) return finishOrAsk(template, currentData, messages);
@@ -727,9 +742,20 @@ export async function generateDesigns(
   const promises = variants.map(async (i): Promise<{ svg: string; label: string; metadata?: any } | null> => {
     if (signal?.aborted) return null;
     try {
-      const svg = await generateOneSvg(input, i);
-      if (svg) return { svg, label: `Вариант ${i + 1}` };
-      return null;
+      let svg = await generateOneSvg(input, i);
+      if (!svg) return null;
+      if (!input.editNote && process.env.VISUAL_REVIEW !== "false") {
+        const fix = await visualReviewSvg(svg);
+        if (fix && !signal?.aborted) {
+          const fixed = await generateOneSvg({ ...input, sourceSvg: svg, editNote: fix }, i);
+          if (fixed) svg = fixed;
+        }
+      }
+      const qrUrl = input.data.qrUrl || input.brief.qrUrl;
+      if (qrUrl && typeof qrUrl === "string" && svg.includes('id="qr"')) {
+        svg = await injectQrCode(svg, qrUrl);
+      }
+      return { svg, label: `Вариант ${i + 1}` };
     } catch (e) {
       console.error(`Design variant ${i} error`, e);
       return null;
@@ -747,7 +773,26 @@ type EditParseResult = {
   responseToUser: string;
   clarificationQuestion?: string | null;
   textReplacements?: { from: string; to: string }[];
+  plan?: string[];
 };
+
+// Named style presets: vague wishes are translated into concrete,
+// repeatable design rules instead of free interpretation.
+const STYLE_PRESETS: [RegExp, string][] = [
+  [/как у apple|эпп?л|айфон/i, "Apple-like style: pure white or near-black background, one accent color max, SF-like sans-serif, extreme whitespace (>40%), thin weights, small centered text, no decorative elements, no gradients except subtle ones."],
+  [/дороже|премиаль|люкс|богаче/i, "Premium style: deep dark background (#0a0a0a-#1a1a1a), gold/champagne accents (#d4af37, #c9b037), serif headline font, generous letter-spacing, thin dividers, symmetric composition, no bright saturated colors."],
+  [/современнее|моднее|стильнее|трендов/i, "Modern style: bold oversized headline, tight line-height, high contrast, one vivid accent color, asymmetric grid, generous whitespace, geometric shapes, sans-serif only."],
+  [/минимализ|проще|чище|лаконич/i, "Minimalist style: max 2 colors + neutral, remove all decorative elements, increase whitespace, single focal point, thin sans-serif, no borders or shadows."],
+  [/ярче|сочнее|веселее|игрив/i, "Vibrant style: saturated complementary colors, bold rounded shapes, playful oversized typography, dynamic diagonal composition, high energy."],
+  [/менее ярк|приглуш|спокойнее|мягче/i, "Muted style: desaturate palette by 40-60%, pastel or earth tones, soft contrast, calm balanced composition, lighter font weights."],
+];
+
+export function matchStylePreset(text: string): string | null {
+  for (const [pattern, rules] of STYLE_PRESETS) {
+    if (pattern.test(text)) return rules;
+  }
+  return null;
+}
 
 async function parseEditInstruction(
   input: DesignGenerationInput,
@@ -766,6 +811,7 @@ Additional rules:
 2. If the user replies with a number/short phrase ("3", "третий", "третий вариант"), resolve it using the assistant's previous multiple-choice options and act on it.
 3. Only ask a clarification question when the request is truly impossible to infer. Prefer to make a reasonable professional design choice and proceed rather than asking. For very vague aesthetic requests ("сделай красиво"), either proceed with a concrete professional improvement or offer 2-3 numbered concrete options in the clarification question.
 4. If the user only changes literal text content that is visible in the design (phone number, website, address, company name, a label), also output textReplacements — exact old visible string → exact new string — so the change can be applied without regenerating the design.
+5. For complex multi-part requests, also output plan — an ordered list of 2-4 short Russian steps you will apply — and make editSummary cover all of them.
 
 Output valid JSON with these fields:
 - intent: "edit", "chat" or "revert".
@@ -773,7 +819,8 @@ Output valid JSON with these fields:
 - editSummary: (for edit) a concise English instruction for the SVG generator describing the concrete change to apply.
 - responseToUser: a short, friendly Russian reply — for chat, the full helpful answer; for edit, a brief acknowledgement of what you are changing.
 - clarificationQuestion: null if the request is clear, otherwise one short Russian question. If multiple-choice, keep the same numbering from the previous assistant message.
-- textReplacements: (optional, only for pure text swaps) array of { "from": "exact old visible text", "to": "new text" }.`;
+- textReplacements: (optional, only for pure text swaps) array of { "from": "exact old visible text", "to": "new text" }.
+- plan: (optional, only for complex multi-part edits) array of 2-4 short Russian step descriptions.`;
 
   const history = messages
     .slice(-10)
@@ -813,13 +860,19 @@ Output valid JSON with these fields:
           })
           .map((r: { from: string; to: string }) => ({ from: r.from, to: r.to }))
       : undefined;
+    const plan: string[] | undefined = Array.isArray(parsed.plan) ? parsed.plan.map(String).slice(0, 4) : undefined;
+    let responseToUser = String(parsed.responseToUser || "Готово.");
+    if (plan?.length && intent === "edit") {
+      responseToUser += "\nПлан: " + plan.map((s: string, i: number) => `${i + 1}) ${s}`).join(" ");
+    }
     return {
       intent,
       updatedData,
       editSummary: String(parsed.editSummary || instruction),
-      responseToUser: String(parsed.responseToUser || "Готово."),
+      responseToUser,
       clarificationQuestion: parsed.clarificationQuestion || undefined,
       textReplacements,
+      plan,
     };
   } catch {
     return fallback;
@@ -848,6 +901,8 @@ export async function editDesigns(
     return [{ svg: "", label: "", clarificationQuestion: parsed.clarificationQuestion }];
   }
 
+  const presetRules = matchStylePreset(instruction);
+
   // Pure text swaps (phone, website, address, name) are applied directly to the
   // source SVG without regenerating the whole design.
   if (sourceSvg && parsed.textReplacements?.length) {
@@ -868,15 +923,63 @@ export async function editDesigns(
     }
   }
 
+  // Diff-based edit: when the source SVG has stable ids, ask the model for a
+  // small list of operations instead of a full regeneration. The untouched
+  // parts of the document remain byte-identical.
+  if (sourceSvg && !presetRules && listElementIds(sourceSvg).length > 0) {
+    const diffed = await diffEditSvg(sourceSvg, parsed.editSummary, signal);
+    if (diffed) {
+      return [{ svg: diffed, label: "Точечная правка" }];
+    }
+  }
+
   const updatedInput: DesignGenerationInput = {
     ...input,
     data: parsed.updatedData,
-    editNote: parsed.editSummary,
+    editNote: presetRules ? `${parsed.editSummary}\nStyle rules to apply: ${presetRules}` : parsed.editSummary,
     sourceSvg,
     referenceImages,
   };
 
   return generateDesigns(updatedInput, count, signal);
+}
+
+// Asks the model for a minimal set of operations on identified elements.
+// Returns the patched SVG, or null when a full regeneration is needed.
+async function diffEditSvg(sourceSvg: string, editSummary: string, signal?: AbortSignal): Promise<string | null> {
+  if (sourceSvg.length > 60000) return null;
+  const system = `You are a precise SVG patch generator. Given an SVG document and a change request, output the SMALLEST set of operations that applies the change. Every operation targets an element by its id attribute.
+
+Return valid JSON only: {"feasible": true, "ops": [...]} or {"feasible": false} when the change cannot be expressed as element operations (e.g. it requires adding new elements or a redesign).
+
+Each op is one of:
+- {"id": "elementId", "attr": "attributeName", "value": "newValue"} — set/replace one attribute (fill, font-size, x, y, transform, opacity, width, height, ...). To move an element, prefer adjusting transform="translate(dx,dy)" or its x/y.
+- {"id": "elementId", "text": "new text"} — replace the text content of a <text>/<tspan> element.
+- {"id": "elementId", "remove": true} — remove the element.
+
+Rules: only reference ids that exist in the document; never invent ids; keep changes minimal; if in doubt, return {"feasible": false}.`;
+
+  const user = `SVG document:\n${sourceSvg}\n\nChange request: ${editSummary}\n\nJSON only.`;
+  const text = await callChatCompletion(system, user, 2048, true, signal, 0);
+  if (!text) return null;
+  try {
+    const jsonStr = extractJson(text);
+    if (!jsonStr) return null;
+    const parsed = JSON.parse(jsonStr);
+    if (!parsed.feasible || !Array.isArray(parsed.ops) || parsed.ops.length === 0) return null;
+    const ops: SvgOp[] = parsed.ops
+      .filter((o: unknown): o is SvgOp => {
+        const op = o as SvgOp;
+        return typeof op?.id === "string" && op.id.length > 0;
+      })
+      .slice(0, 20);
+    if (ops.length === 0) return null;
+    const result = applySvgOps(sourceSvg, ops);
+    if (!result || !passesQualityCheck(result)) return null;
+    return result;
+  } catch {
+    return null;
+  }
 }
 
 export type ImageAnalysis = {
@@ -901,7 +1004,11 @@ const EMPTY_IMAGE_ANALYSIS: ImageAnalysis = {
   typography: "",
 };
 
+const imageAnalysisCache = new Map<string, ImageAnalysis>();
+
 export async function analyzeImage(imageUrl: string): Promise<ImageAnalysis> {
+  const cached = imageAnalysisCache.get(imageUrl);
+  if (cached) return cached;
   const b64 = await imageUrlToBase64(imageUrl);
   if (!b64) {
     return { ...EMPTY_IMAGE_ANALYSIS };
@@ -933,7 +1040,7 @@ Be precise with text. Do not invent text that is not visible.`;
 
   try {
     const parsed = JSON.parse(jsonStr);
-    return {
+    const analysis: ImageAnalysis = {
       text: String(parsed.text || ""),
       description: String(parsed.description || ""),
       colors: Array.isArray(parsed.colors) ? parsed.colors.map(String) : [],
@@ -943,6 +1050,9 @@ Be precise with text. Do not invent text that is not visible.`;
       composition: String(parsed.composition || ""),
       typography: String(parsed.typography || ""),
     };
+    if (imageAnalysisCache.size > 500) imageAnalysisCache.clear();
+    imageAnalysisCache.set(imageUrl, analysis);
+    return analysis;
   } catch {
     return { ...EMPTY_IMAGE_ANALYSIS };
   }
@@ -980,8 +1090,10 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
   const isEdit = Boolean(input.editNote && (input.sourceSvg || (input.referenceImages || []).length > 0));
 
   const system = isEdit
-    ? `You are a precise SVG editor. The user provides a design and a single change request. Output ONLY the full updated SVG. Do not redesign, do not add/remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so. Keep the same viewBox. Output raw SVG 1.1 only, no markdown, no comments.`
+    ? `You are a precise SVG editor. The user provides a design and a single change request. Output ONLY the full updated SVG. Do not redesign, do not add/remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so. Keep the same viewBox. Preserve existing id attributes on elements. Output raw SVG 1.1 only, no markdown, no comments.`
     : `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster.
+
+${STABLE_IDS_RULE}
 
 ${DESIGN_QUALITY_RULES}`;
 
@@ -1034,6 +1146,35 @@ ${DESIGN_QUALITY_RULES}`;
   return attempt();
 }
 
+// Renders the SVG to PNG and asks the model to visually verify it. Returns a
+// concise fix instruction if a real problem is found, otherwise null.
+async function visualReviewSvg(svg: string): Promise<string | null> {
+  try {
+    const { default: sharp } = await import("sharp");
+    const png = await sharp(Buffer.from(svg)).resize(768, 768, { fit: "inside" }).png().toBuffer();
+    const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+
+    const system = `You are a strict design QA reviewer. Look at the rendered design and check ONLY for real defects: unreadable text (too small or poor contrast), overlapping elements, text or elements cut off at the edges, a stretched/distorted logo, obviously broken layout. Ignore taste and style. Return valid JSON only: {"ok": true} if the design has no defects, or {"ok": false, "fix": "one concise English instruction describing exactly what to fix"} if it does.`;
+
+    const content: ChatContentPart[] = [
+      { type: "text", text: "Review this design for defects. JSON only." },
+      { type: "image_url", image_url: { url: dataUrl } },
+    ];
+    const text = await callChatCompletion(system, content, 512, true, undefined, 0);
+    if (!text) return null;
+    const jsonStr = extractJson(text);
+    if (!jsonStr) return null;
+    const parsed = JSON.parse(jsonStr);
+    if (parsed.ok === false && typeof parsed.fix === "string" && parsed.fix.trim()) {
+      return parsed.fix.trim();
+    }
+    return null;
+  } catch (e) {
+    console.warn("Visual review failed", e);
+    return null;
+  }
+}
+
 function passesQualityCheck(svg: string): boolean {
   if (!/viewBox\s*=\s*"[\d\s.,-]+"/i.test(svg)) return false;
   if (/\bNaN\b|undefined/.test(svg)) return false;
@@ -1043,8 +1184,61 @@ function passesQualityCheck(svg: string): boolean {
     const selfClosed = (svg.match(new RegExp(`<${tag}[^>]*/>`, "gi")) || []).length;
     if (open !== close + selfClosed) return false;
   }
+  if (!passesContrastCheck(svg)) return false;
+  if (!passesBoundsCheck(svg)) return false;
   return true;
 }
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  let h = hex.replace("#", "");
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  if (h.length !== 6 || /[^0-9a-f]/i.test(h)) return null;
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function luminance(rgb: [number, number, number]): number {
+  const [r, g, b] = rgb.map((v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+// Rejects designs where text color is nearly identical to a solid full-bleed
+// background (light-on-light / dark-on-dark). Lenient: skips gradients and
+// designs without a detectable background.
+function passesContrastCheck(svg: string): boolean {
+  const bgMatch = svg.match(/<rect[^>]*\bfill="(#[0-9a-f]{3,6})"[^>]*>/i);
+  if (!bgMatch) return true;
+  const bg = hexToRgb(bgMatch[1]);
+  if (!bg) return true;
+  const bgLum = luminance(bg);
+  const textFills = [...svg.matchAll(/<text[^>]*\bfill="(#[0-9a-f]{3,6})"/gi)].map((m) => m[1]);
+  for (const fill of textFills) {
+    const rgb = hexToRgb(fill);
+    if (!rgb) continue;
+    const ratio = (Math.max(bgLum, luminance(rgb)) + 0.05) / (Math.min(bgLum, luminance(rgb)) + 0.05);
+    if (ratio < 1.5) return false;
+  }
+  return true;
+}
+
+// Rejects designs where text coordinates fall outside the viewBox.
+function passesBoundsCheck(svg: string): boolean {
+  const vb = svg.match(/viewBox\s*=\s*"([\d\s.,-]+)"/i);
+  if (!vb) return true;
+  const parts = vb[1].trim().split(/[\s,]+/).map(Number);
+  if (parts.length !== 4 || parts.some(isNaN)) return true;
+  const [minX, minY, w, h] = parts;
+  for (const m of svg.matchAll(/<text[^>]*\bx="(-?[\d.]+)"[^>]*\by="(-?[\d.]+)"/gi)) {
+    const x = Number(m[1]);
+    const y = Number(m[2]);
+    if (x < minX - 1 || x > minX + w + 1 || y < minY - 1 || y > minY + h + 1) return false;
+  }
+  return true;
+}
+
+const STABLE_IDS_RULE = `STABLE IDS (mandatory): assign stable id attributes to key elements so they can be edited individually later: id="background" (full-bleed background), id="logo", id="headline", id="subheadline", id="phone", id="website", id="address", id="email", id="cta", id="qr". Wrap multi-shape elements (like a logo) in <g id="...">. If a QR code is required, output ONLY a single placeholder <rect id="qr" x="..." y="..." width="..." height="..." fill="#ffffff"/> — the real QR code is inserted programmatically.`;
 
 const DESIGN_QUALITY_RULES = `DESIGN QUALITY RULES (mandatory):
 1. Composition: logical and balanced layout, no chaotic placement, no large empty zones, no overlapping elements.
@@ -1117,9 +1311,12 @@ function buildDesignPrompt(input: DesignGenerationInput): string {
     ? `\nReference style (match the mood, palette and typography of the user's reference, but do NOT copy its exact layout): ${trunc(input.referenceStyle, 400)}`
     : "";
 
+  const preset = matchStylePreset(`${brief.style || ""} ${data.editInstruction || ""}`);
+  const presetNote = preset ? `\nStyle rules: ${preset}` : "";
+
   return `Create a ${role} for "${brief.companyName || template.name}".
 Business: ${trunc(brief.businessDesc, 80) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 50)}. Palette: ${concept.palette.join(", ")}.
-Template: ${template.name}.${designHint}${transparentNote}${referenceNote}
+Template: ${template.name}.${designHint}${transparentNote}${referenceNote}${presetNote}
 viewBox="${viewBox}" (${w}×${h}).${textBlocks ? "\n" + textBlocks : ""}
 Output raw SVG only.`;
 }

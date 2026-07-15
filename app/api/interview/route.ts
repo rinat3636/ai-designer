@@ -29,7 +29,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Template not found" }, { status: 404 });
     }
 
-    const result = await chatInterview(messages, template, currentData || {});
+    const memory = await prisma.projectMemory.findUnique({ where: { userId: user.id } });
+    const result = await chatInterview(messages, template, currentData || {}, memory);
     return NextResponse.json(result);
   } catch (error) {
     console.error("Interview API error", error);

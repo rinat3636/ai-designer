@@ -1182,16 +1182,7 @@ export function CreateWizard({
   }
 
   function GeneratingPanel() {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
-        <Sparkles className="size-12 animate-pulse text-primary" />
-        <div>
-          <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
-          <p className="text-muted-foreground">Это может занять до одной минуты</p>
-        </div>
-        <Progress value={50} className="w-full max-w-md" />
-      </div>
-    );
+    return <GenerationProgress />;
   }
 
   function ResultWorkspace() {
@@ -1457,6 +1448,45 @@ export function CreateWizard({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+const GENERATION_STAGES = [
+  "Анализ брифа и концепции",
+  "Построение композиции",
+  "Отрисовка макета",
+  "Проверка качества",
+  "Финальная подготовка",
+];
+
+function GenerationProgress() {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const stageIndex = Math.min(Math.floor(elapsed / 12), GENERATION_STAGES.length - 1);
+  const progress = Math.min(5 + elapsed * 1.6, 95);
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
+      <Sparkles className="size-12 animate-pulse text-primary" />
+      <div>
+        <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
+        <p className="text-muted-foreground">{GENERATION_STAGES[stageIndex]}…</p>
+      </div>
+      <Progress value={progress} className="w-full max-w-md" />
+      <ul className="space-y-1 text-left text-sm text-muted-foreground">
+        {GENERATION_STAGES.map((stage, i) => (
+          <li key={stage} className={i < stageIndex ? "text-foreground" : i === stageIndex ? "text-primary" : ""}>
+            {i < stageIndex ? "✓ " : i === stageIndex ? "→ " : "· "}
+            {stage}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
