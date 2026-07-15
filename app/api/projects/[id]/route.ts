@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { editDesigns, type Brief, type Concept, type DesignGenerationInput } from "@/lib/llm";
 import { getViewBoxForTemplate } from "@/lib/design";
@@ -54,6 +55,7 @@ export async function POST(
 ) {
   const user = await getSession();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!rateLimit(`edit:${user.id}`, 10, 60_000)) return rateLimitResponse();
 
   const { id } = await params;
   const body = await request.json();
@@ -132,6 +134,22 @@ export async function POST(
       referenceImages,
       chatMessages
     );
+
+    const special = designs.find((d) => d.chatReply || d.revert);
+    if (special) {
+      await prisma.generation.update({
+        where: { id },
+        data: {
+          status: "completed",
+          chatHistory: [
+            ...history,
+            { role: "user", content: instruction, at: new Date().toISOString() },
+            { role: "assistant", content: special.chatReply, at: new Date().toISOString() },
+          ],
+        },
+      });
+      return NextResponse.json({ assistantMessage: special.chatReply, revert: Boolean(special.revert) });
+    }
 
     const clarification = designs.find((d) => d.clarificationQuestion);
     if (clarification) {

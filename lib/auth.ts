@@ -14,7 +14,13 @@ const COOKIE_NAME = "ai-session";
 const ANONYMOUS_EMAIL = "anonymous@ai-designer.local";
 
 function getSecret() {
-  const raw = process.env.APP_SECRET || "dev-secret-change-in-production";
+  const raw = process.env.APP_SECRET;
+  if (!raw) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("APP_SECRET must be set in production");
+    }
+    return new TextEncoder().encode("dev-secret-change-in-production");
+  }
   return new TextEncoder().encode(raw);
 }
 
@@ -58,15 +64,20 @@ async function getAnonymousUser(): Promise<SessionUser> {
         email: ANONYMOUS_EMAIL,
         name: "Гость",
         password: await hashPassword("anonymous"),
-        role: "ADMIN",
+        role: "USER",
       },
+    });
+  } else if (user.role === "ADMIN") {
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: { role: "USER" },
     });
   }
   return {
     id: user.id,
     email: user.email,
     name: user.name,
-    role: user.role,
+    role: "USER",
   };
 }
 

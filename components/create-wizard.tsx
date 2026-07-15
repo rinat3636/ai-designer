@@ -105,6 +105,7 @@ export function CreateWizard({
   const [dragOver, setDragOver] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const selectionHistoryRef = useRef<GenerationImage[]>([]);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -512,11 +513,20 @@ export function CreateWizard({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error);
 
-      if (json.clarificationQuestion) {
+      if (json.revert) {
+        const previous = selectionHistoryRef.current.pop();
+        if (previous) {
+          setSelectedResultImage(previous);
+        }
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage || "Вернул предыдущий вариант." }]);
+      } else if (json.assistantMessage) {
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
+      } else if (json.clarificationQuestion) {
         setEditMessages((prev) => [...prev, { role: "assistant", content: json.clarificationQuestion }]);
       } else {
         const newImages = (json.images || []) as GenerationImage[];
         if (newImages.length > 0) {
+          if (selectedResultImage) selectionHistoryRef.current.push(selectedResultImage);
           setResultImages((prev) => [...prev, ...newImages]);
           setSelectedResultImage(newImages[0]);
           toast("Варианты отредактированы");

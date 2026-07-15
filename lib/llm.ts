@@ -741,6 +741,7 @@ export async function generateDesigns(
 }
 
 type EditParseResult = {
+  intent: "edit" | "chat" | "revert";
   updatedData: Record<string, string>;
   editSummary: string;
   responseToUser: string;
@@ -752,18 +753,23 @@ async function parseEditInstruction(
   instruction: string,
   messages: ChatMessage[] = []
 ): Promise<EditParseResult> {
-  const system = `You are an AI design editor in a chat conversation. The user is editing an existing design of type "${input.template.name}" (${input.template.category}).
+  const system = `You are a smart AI designer-assistant in a chat conversation. The user is working on a design of type "${input.template.name}" (${input.template.category}). You understand natural, informal speech — the user never has to use special commands.
 
-Your job:
-1. Read the conversation history and the latest user request.
+First classify the latest user message into an intent:
+- "edit" — the user wants any change to the current design, even vaguely worded ("сделай современнее", "мне кажется, пустовато", "хочу, чтобы выглядело дороже", "сделай как у Apple", "передвинь немного вправо"). Translate the vague wish into a concrete professional design change. If the user sends their own prompt, analyze it, improve it if needed, and merge it with any other requests in the message.
+- "revert" — the user wants to undo the last change and return to how it was ("верни как было", "отмени", "нет, предыдущий был лучше").
+- "chat" — the user asks a question or wants advice (design, marketing, branding, colors, fonts, composition, how the service works) without requesting a change. Answer helpfully and concretely in responseToUser. Never refuse with canned phrases; if you can understand the question, help. When useful, proactively suggest 1-2 specific improvements to the current design and briefly explain why.
+
+Additional rules:
+1. Use the full conversation history; references like "он", "этот вариант", "тот телефон" refer to the currently selected design and earlier messages.
 2. If the user replies with a number/short phrase ("3", "третий", "третий вариант"), resolve it using the assistant's previous multiple-choice options and act on it.
-3. If the request is clear enough, output an updated design data object, an English SVG edit instruction, and a short Russian response.
-4. Only ask a clarification question when the request is truly impossible to infer. Prefer to make a reasonable design choice and proceed rather than asking.
+3. Only ask a clarification question when the request is truly impossible to infer. Prefer to make a reasonable professional design choice and proceed rather than asking.
 
 Output valid JSON with these fields:
-- updatedData: object with the same keys as the current data but updated values. Set a value to "" to remove it. Add new keys only if they naturally fit the request (phone, address, qrUrl, website, discount, etc.).
-- editSummary: a concise English instruction for the SVG generator describing the change to apply.
-- responseToUser: a short, friendly Russian acknowledgement or the clarification question.
+- intent: "edit", "chat" or "revert".
+- updatedData: (for edit) object with the same keys as the current data but updated values. Set a value to "" to remove it. Add new keys only if they naturally fit the request (phone, address, qrUrl, website, discount, etc.).
+- editSummary: (for edit) a concise English instruction for the SVG generator describing the concrete change to apply.
+- responseToUser: a short, friendly Russian reply — for chat, the full helpful answer; for edit, a brief acknowledgement of what you are changing.
 - clarificationQuestion: null if the request is clear, otherwise one short Russian question. If multiple-choice, keep the same numbering from the previous assistant message.`;
 
   const history = messages
@@ -775,6 +781,7 @@ Output valid JSON with these fields:
 
   const text = await callChatCompletion(system, user, 4096, true);
   const fallback: EditParseResult = {
+    intent: "edit",
     updatedData: { ...input.data, editInstruction: instruction },
     editSummary: instruction,
     responseToUser: "Понял, применяю правку.",
@@ -793,7 +800,10 @@ Output valid JSON with these fields:
       if (str === "" && k !== "editInstruction") continue;
       updatedData[k] = str;
     }
+    const intent =
+      parsed.intent === "chat" || parsed.intent === "revert" ? parsed.intent : "edit";
     return {
+      intent,
       updatedData,
       editSummary: String(parsed.editSummary || instruction),
       responseToUser: String(parsed.responseToUser || "Готово."),
@@ -812,10 +822,16 @@ export async function editDesigns(
   referenceImages?: string[],
   messages: ChatMessage[] = [],
   signal?: AbortSignal
-): Promise<{ svg: string; label: string; clarificationQuestion?: string }[]> {
+): Promise<{ svg: string; label: string; clarificationQuestion?: string; chatReply?: string; revert?: boolean }[]> {
   if (!getApiConfig()) return [];
 
   const parsed = await parseEditInstruction(input, instruction, messages);
+  if (parsed.intent === "revert") {
+    return [{ svg: "", label: "", revert: true, chatReply: parsed.responseToUser || "Вернул предыдущий вариант." }];
+  }
+  if (parsed.intent === "chat") {
+    return [{ svg: "", label: "", chatReply: parsed.responseToUser }];
+  }
   if (parsed.clarificationQuestion) {
     return [{ svg: "", label: "", clarificationQuestion: parsed.clarificationQuestion }];
   }

@@ -140,7 +140,9 @@ export function ResultGallery({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error);
 
-      if (json.clarificationQuestion) {
+      if (json.assistantMessage) {
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
+      } else if (json.clarificationQuestion) {
         setEditMessages((prev) => [...prev, { role: "assistant", content: json.clarificationQuestion }]);
       } else {
         const newImages = (json.images || []) as GenerationImage[];
