@@ -1,6 +1,6 @@
 import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { CreateWizard } from "@/components/create-wizard";
+import { ChatWizard } from "@/components/chat-wizard";
 
 export default async function HomePage() {
   const user = await getSession();
@@ -15,7 +15,7 @@ export default async function HomePage() {
   });
 
   return (
-    <CreateWizard
+    <ChatWizard
       templates={JSON.parse(JSON.stringify(templates))}
       brand={brand ? JSON.parse(JSON.stringify(brand)) : null}
     />

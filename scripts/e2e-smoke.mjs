@@ -26,32 +26,20 @@ async function runOnce() {
     await page.getByText("Сгенерировать новый дизайн", { exact: true }).first().click();
     await page.getByText("Логотип", { exact: true }).first().waitFor({ timeout: 15000 });
     await page.getByText("Логотип", { exact: true }).first().click();
-    // wait for the chat to become active
     await page.waitForFunction(() => {
       const t = document.querySelector('textarea');
       return t && !t.disabled;
     }, { timeout: 15000 });
-    const activePlaceholder = await page.locator("textarea").getAttribute("placeholder");
-    assert(activePlaceholder === "Ваш ответ…", `Expected placeholder 'Ваш ответ…', got ${activePlaceholder}`);
     console.log("   Template selected, chat active");
 
-    console.log("3. Send a message and wait for concepts");
+    console.log("3. Send a message and wait for result");
     await page.locator("textarea").fill("Нужен логотип для строительной компании КаркасПро, каркасные дома, минимализм, синий и серый, 1200x1200");
     await page.locator("button:has-text('OK')").click();
-    await page.locator("text=Выберите концепцию").first().waitFor({ timeout: 180000 });
-    const bodyAfter = await page.locator("body").innerText();
-    assert(bodyAfter.includes("Выберите концепцию"), "Concept selection not reached");
-    console.log("   Concepts received");
-
-    console.log("4. Select a concept");
-    const firstConcept = page.locator('.cursor-pointer [data-slot="card-title"]').first();
-    const conceptName = await firstConcept.innerText({ timeout: 15000 });
-    await firstConcept.click();
-    await page.waitForTimeout(2000);
-    const generatingText = await page.locator("body").innerText();
-    const hasImage = await page.locator("img").count() > 0;
-    assert(generatingText.includes("Генерируем") || generatingText.includes("Макеты") || hasImage, "Generation did not start");
-    console.log("   Concept selected:", conceptName.trim());
+    const resultImg = page.locator("img[src^='/generated/']").first();
+    await resultImg.waitFor({ timeout: 240000 });
+    const src = await resultImg.getAttribute("src");
+    assert(src && src.includes("/generated/"), "No generated image");
+    console.log("   Result received:", src);
   } catch (e) {
     await page.screenshot({ path: "/tmp/e2e-failure.png" });
     throw e;
