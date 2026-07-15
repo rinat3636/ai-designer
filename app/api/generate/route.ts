@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { generateDesigns, type Brief, type Concept } from "@/lib/llm";
-import { getViewBoxForTemplate } from "@/lib/design";
+import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
 import { saveSvg } from "@/lib/storage";
 
 export const maxDuration = 120;
@@ -61,7 +61,12 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    const viewBox = getViewBoxForTemplate(template.slug);
+    let viewBox = getViewBoxForTemplate(template.slug);
+    const userSize = parseUserSize(data?.size || brief?.size);
+    if (userSize) {
+      viewBox = `0 0 ${userSize.width} ${userSize.height}`;
+    }
+
     const designs = await generateDesigns(
       {
         brief: brief as Brief,

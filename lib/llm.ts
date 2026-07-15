@@ -131,21 +131,22 @@ export async function chatInterview(
   const conceptHint = template.promptHints?.concept || "";
   const designHint = template.promptHints?.design || "";
 
-  const systemPrompt = `Ты — профессиональный арт-директор и дизайнер. Веди живой диалог с клиентом, чтобы собрать бриф для дизайна: "${template.name}" (${template.category}).
+  const systemPrompt = `Ты — старший арт-директор студии. Веди профессиональный диалог с клиентом для создания дизайна: "${template.name}" (${template.category}).
 
-Важные правила:
-1. Задавай ровно один короткий, профессиональный вопрос за раз на русском языке.
-2. Прими любую информацию, которую клиент даёт сам: текст, фото-референсы, пожелания.
-3. Если клиент загружает фото, прокомментируй, что в нём важно, и задай уточняющий вопрос.
-4. Поддерживай диалог — отвечай на сказанное, не повторяй один и тот же вопрос.
-5. После 3-6 вопросов, когда у тебя достаточно данных, предложи 4-6 концепций и заверши диалог.
+Как вести диалог:
+1. Задавай ровно один короткий, деловой вопрос за раз на русском языке.
+2. Прими любую информацию от клиента: текст, фото-референсы, пожелания, размеры, формат.
+3. Если клиент загружает фото, кратко скажи, что извлёк, и задай уточняющий вопрос.
+4. Поддерживай контекст — отвечай на сказанное, не повторяй вопросы, сохраняй уже полученные данные.
+5. Собирай ключевые параметры: что за бизнес, название, аудитория, стиль, цвета, размер/формат, текстовые блоки, фото-референсы.
+6. После 3-6 вопросов, когда данных достаточно, предложи 4-6 концепций с анализом и заверши диалог.
 
 Справка по типу дизайна:
 - Описание: ${template.description || "—"}
 - Подсказка для концепций: ${conceptHint || "—"}
 - Подсказка для макета: ${designHint || "—"}
 
-Дополнительные поля макета (заполнять неявно через диалог):
+Поля макета (заполнять неявно через диалог):
 ${fields || "- нет специфических полей"}
 
 В каждом ответе возвращай ТОЛЬКО JSON, строго такого вида, без markdown и без текста вне JSON:
@@ -157,14 +158,17 @@ ${fields || "- нет специфических полей"}
     "targetAudience": "аудитория",
     "style": "стиль",
     "colors": ["#hex", "#hex"],
+    "size": "1200x630",
     "logoUrl": "",
     "referenceImages": ["url", "url"],
-    "data": { "headline": "", "subheadline": "" }
+    "data": { "headline": "", "subheadline": "", "size": "1200x630" }
   },
   "done": false,
   "analysis": null,
   "concepts": null
 }
+
+Если клиент просит конкретный размер (например, 1200x630, 1080x1920, A4), сохрани его в extractedData.size и extractedData.data.size. Если размер не нужен, оставь пустым.
 
 Когда готов предложить концепции, установи done: true:
 {
@@ -173,11 +177,11 @@ ${fields || "- нет специфических полей"}
   "done": true,
   "analysis": "2-4 предложения анализа ниши и стиля",
   "concepts": [
-    { "name": "1-2 слова", "description": "1-2 предложения", "explanation": "почему подходит", "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"], "recommendations": ["...", "..."] }
+    { "name": "1-2 слова", "description": "1-2 предложения", "explanation": "почему подходит именно этому бизнесу", "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"], "recommendations": ["...", "..."] }
   ]
 }
 
-ВАЖНО: JSON должен быть валидным. Если клиент уже ответил на вопрос, обязательно сохрани этот ответ в extractedData и задай следующий вопрос. Не повторяй уже заданный вопрос.
+ВАЖНО: JSON должен быть валидным. Если клиент уже ответил на вопрос, обязательно сохрани этот ответ в extractedData и задай следующий, логичный вопрос. Не повторяй уже заданный вопрос. Не теряй уже собранные данные.
 
 currentData на данный момент: ${JSON.stringify(currentData)}`;
 
@@ -356,6 +360,12 @@ async function heuristicInterview(
 
   // Try to understand the latest answer.
   const updated = { ...currentData };
+  const size = extractSizeFromText(lastUserText);
+  if (size) {
+    updated.size = size;
+    if (!updated.data || typeof updated.data !== "object") updated.data = {};
+    updated.data.size = size;
+  }
   if (lastUserText && !updated.businessDesc) {
     updated.businessDesc = lastUserText;
   } else if (lastUserText && !updated.companyName) {
@@ -404,6 +414,11 @@ async function heuristicInterview(
     analysis: conceptResult.analysis,
     concepts: conceptResult.concepts,
   };
+}
+
+function extractSizeFromText(text: string): string {
+  const match = text.match(/(\d{2,4})\s?[x×]\s?(\d{2,4})/i);
+  return match ? `${match[1]}x${match[2]}` : "";
 }
 
 function extractTextFromMessage(message?: ChatMessage): string {
@@ -577,16 +592,26 @@ export async function generateDesigns(
 async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
   if (!getApiConfig()) return null;
 
-  const system =
-    "You are an expert graphic designer. Generate a complete, valid SVG 1.1 design. Output raw SVG markup only, without markdown code fences, explanations or comments. Use only system fonts (sans-serif, serif, monospace). Keep text readable and inside the viewBox.";
+  const system = `You are an expert SVG graphic designer. Output a single, valid SVG 1.1 design as raw markup.
+
+Rules:
+- Start the response with <svg and end with </svg>. No markdown, no explanation, no comments.
+- Use only sans-serif, serif or monospace fonts.
+- All text must fit inside the viewBox.
+- Use simple flat vector shapes. No raster images.
+- Keep the design balanced and professional.`;
 
   const userPrompt = buildDesignPrompt(input, variantIndex);
-
-  const text = await callChatCompletion(system, userPrompt, 4096);
+  // Claude reasoning models need a large token budget: internal reasoning consumes
+  // most of the budget, so we request plenty of room for the actual SVG output.
+  const text = await callChatCompletion(system, userPrompt, 16000);
   if (!text) return null;
 
   const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/i);
-  if (!svgMatch) return null;
+  if (!svgMatch) {
+    console.warn(`No SVG found in design response #${variantIndex + 1}`);
+    return null;
+  }
   let svg = svgMatch[0];
   if (!svg.includes("xmlns=")) {
     svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
@@ -597,37 +622,88 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
 function buildDesignPrompt(input: DesignGenerationInput, variantIndex: number): string {
   const { brief, concept, data, template, viewBox } = input;
   const [w, h] = viewBox.split(" ").slice(2).map(Number);
-  const orientation = w >= h ? "landscape" : "portrait";
-  const styleHints = [
-    "clean centered layout",
-    "asymmetric composition with accent shape",
-    "bold typographic hierarchy",
-    "soft gradient background with geometric accents",
-  ];
+
+  const isTransparent =
+    template.slug.includes("logo") ||
+    template.slug.includes("icons") ||
+    template.promptHints?.transparent === true;
+
   const textBlocks = Object.entries(data)
     .filter(([, v]) => typeof v === "string" && v.trim())
     .map(([k, v]) => `${k}: ${v}`)
     .join("\n");
 
-  const designHint = template.promptHints?.design
-    ? `\n\nТип дизайна "${template.name}" (${template.category}). Специфические требования: ${template.promptHints.design}`
-    : `\n\nTemplate: ${template.name} (${template.category}).`;
-  const transparentNote = template.promptHints?.transparent
-    ? "\n\nBackground must be transparent. Do NOT draw any background rectangle, gradient or fill behind the main design. Only the design elements on a transparent canvas."
+  const composition = getDesignStyleHints(template, variantIndex);
+  const designHint = template.promptHints?.design ? ` ${template.promptHints.design}` : "";
+  const transparentNote = isTransparent
+    ? " IMPORTANT: The background must be transparent. Do NOT draw any background rectangle, gradient or fill behind the main design."
     : "";
 
-  return `Design a ${orientation} marketing graphic for a business.
+  const role = template.slug.includes("logo")
+    ? "Create a professional logo mark."
+    : template.slug.includes("icons")
+    ? "Create a clean UI icon set."
+    : template.slug.includes("business-card")
+    ? "Create a professional business card layout."
+    : template.slug.includes("certificate")
+    ? "Create an elegant certificate."
+    : "Create a professional marketing graphic.";
 
-Canvas: viewBox="${viewBox}".
+  return `${role}
+Business: ${brief.companyName || "—"} — ${brief.businessDesc || "—"}. Audience: ${brief.targetAudience || "—"}.
+Concept: ${concept.name} — ${concept.description}. Style: ${brief.style || concept.name}. Colors: ${concept.palette.join(", ")}.
+Specific instructions for "${template.name}" (${template.category}):${designHint}${transparentNote}
+Canvas: viewBox="${viewBox}" (${w}×${h}).
+Text / data to include (keep it short and in the brand language):
+${textBlocks || "(create concise copy from the business above)"}
+Composition for variant #${variantIndex + 1}: ${composition}.
 
-Business: ${brief.companyName || ""} — ${brief.businessDesc || ""}. Target audience: ${brief.targetAudience || ""}.
+Output raw SVG only.`;
+}
 
-Design concept "${concept.name}": ${concept.description}. Palette (use only these hex colors): ${concept.palette.join(", ")}.${designHint}${transparentNote}
+function getDesignStyleHints(template: DesignGenerationInput["template"], variantIndex: number): string {
+  const slug = template.slug;
+  const logoHints = [
+    "symbol mark centered above the wordmark, clean spacing",
+    "lettermark in a simple geometric frame with brand name beside it",
+    "minimal icon on the left, brand name on the right, baseline-aligned",
+    "badge-style emblem with the brand name as a lockup",
+  ];
+  const bannerHints = [
+    "text aligned left with a bold accent shape on the right",
+    "centered headline with soft gradient background and CTA button below",
+    "split layout: text left, simple icon/illustration right",
+    "full-bleed background shape with high-contrast headline overlay",
+  ];
+  const cardHints = [
+    "classic layout with logo top-left, name large, contacts bottom-right",
+    "modern left/right split: name and role on the left, contact icons on the right",
+    "centered name with subtle accent line and compact contact block below",
+    "minimal top-aligned logo, large name, airy contact grid",
+  ];
+  const certificateHints = [
+    "elegant border frame with centered title, generous whitespace",
+    "ornate corner decorations with ribbon accent and centered text",
+    "modern minimal certificate with top logo and bottom signature lines",
+    "classic diploma layout with script-style title and seal area",
+  ];
+  const iconHints = [
+    "2×3 grid of monoline icons with consistent 24px-style stroke",
+    "3×2 grid of filled/simple icons with rounded corners",
+    "2×2 large icons with labels underneath",
+    "3×3 compact icon set in a clean square arrangement",
+  ];
+  const genericHints = [
+    "clean centered layout with bold headline and supporting text",
+    "asymmetric composition with a large accent shape",
+    "bold typographic hierarchy with a strong CTA",
+    "soft geometric background with text aligned to a grid",
+  ];
 
-Required text / data:
-${textBlocks || "( create short marketing text in Russian )"}
-
-Composition preference for this variant (#${variantIndex + 1}): ${styleHints[variantIndex % styleHints.length]}.
-
-Return a single self-contained SVG with embedded styles. Use the concept colors as background gradients and accents. Add the business name and key text prominently. Do not include raster images.`;
+  if (slug.includes("logo")) return logoHints[variantIndex % logoHints.length];
+  if (slug.includes("business-card")) return cardHints[variantIndex % cardHints.length];
+  if (slug.includes("certificate")) return certificateHints[variantIndex % certificateHints.length];
+  if (slug.includes("icons")) return iconHints[variantIndex % iconHints.length];
+  if (slug.includes("banner") || slug.includes("hero") || slug.includes("billboard") || slug.includes("promo")) return bannerHints[variantIndex % bannerHints.length];
+  return genericHints[variantIndex % genericHints.length];
 }

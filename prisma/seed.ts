@@ -65,90 +65,92 @@ async function main() {
   ];
 
   // Per-template instructions for concept and design generation
-  const promptHintsBySlug: Record<string, { concept: string; design: string }> = {
+  const promptHintsBySlug: Record<string, { concept: string; design: string; transparent?: boolean }> = {
     "marketplace-product-card": {
-      concept: "Концепции для карточки товара на маркетплейсе: акцент на цене/выгоде, чистый фон, крупный продукт, минимум текста.",
-      design: "Горизонтальная или квадратная карточка товара. Покажи продукт как простую векторную иконку/силуэт, цену и скидку крупным шрифтом, короткое название. Фон светлый, без мелких деталей.",
+      concept: "Концепции карточки товара для маркетплейса: чистый фон, крупный продукт/иконка, читаемая цена и скидка, минимум текста, акцент на выгоде.",
+      design: "Create a marketplace product card. Use a clean light background. Show the product as a simple vector icon or silhouette. Make the price and discount the largest elements. Add a short product name and a small CTA. Keep the layout spacious, high contrast, and mobile-readable.",
     },
     "marketplace-infographic": {
-      concept: "Инфографика для маркетплейса: 3-5 читаемых преимуществ с иконками, чёткая структура.",
-      design: "Инфографика в виде вертикального или горизонтального списка: иконка + короткая подпись преимущества. 4-6 блоков, крупный шрифт, контрастные акценты.",
+      concept: "Инфографика для маркетплейса: 4-6 преимуществ в виде иконка + короткая подпись, чёткая сетка, контрастные акценты, без мелкого текста.",
+      design: "Build an infographic as a clean vertical or horizontal list. Each item is a simple icon + one short line of text. Use 4-6 items, large fonts, plenty of whitespace, and accent colors from the palette. No tiny details.",
     },
     "marketplace-promo-banner": {
-      concept: "Баннер акции на маркетплейсе: яркая скидка, чёткий CTA, минимум текста.",
-      design: "Баннер с крупной скидкой (например, -30%), коротким заголовком и кнопкой. Фон яркий, но не перегруженный.",
+      concept: "Баннер акции на маркетплейсе: яркая скидка, короткий заголовок, сильный CTA, контрастная палитра.",
+      design: "Design a promo banner. The discount percentage must be the largest element. Add a short headline and a clear CTA button. Use a bright but not cluttered background. Keep text under 8 words.",
     },
     "marketplace-shop-cover": {
-      concept: "Шапка/обложка магазина на маркетплейсе: широкий формат, название, слоган, минимум деталей.",
-      design: "Широкий горизонтальный баннер 1920×640. Слева название магазина и слоган, справа простая графика/иконка. Минимум текста.",
+      concept: "Шапка магазина на маркетплейсе: широкий формат, название, слоган, простая графика, минимум текста.",
+      design: "Design a wide shop cover (1920×640 feel). Place the shop name and tagline on the left. Use a simple icon or shape on the right. Keep the background solid or with a very subtle gradient. Minimal text.",
     },
     "ad-banner": {
-      concept: "Рекламный баннер: короткий продающий заголовок, CTA, контрастная палитра, минимум текста.",
-      design: "Горизонтальный рекламный баннер. Крупный заголовок, одно короткое преимущество, кнопка. Фон — сплошной или с мягким градиентом.",
+      concept: "Рекламный баннер: один короткий продающий заголовок, чёткий CTA, контрастная палитра, много воздуха.",
+      design: "Design a horizontal ad banner. One strong headline (max 5 words), one short benefit, and a CTA button. Use high-contrast text on a solid or soft gradient background. Leave clean negative space around text.",
     },
     "ad-poster": {
-      concept: "Афиша мероприятия: название, дата/место, призыв, выразительная типографика.",
-      design: "Афиша с названием события, датой/местом, декоративным элементом. Вертикальный или квадратный формат, выразительная типографика.",
+      concept: "Афиша мероприятия: название, дата/место, призыв, выразительная типографика, лёгкая атмосфера.",
+      design: "Design an event poster. Prominent event name at the top, date/location below, and a clear call to action. Use expressive but readable typography. Add one simple decorative element. Vertical or square format.",
     },
     "ad-poster2": {
-      concept: "Декоративный постер: художественная композиция, минимум текста, акцент на стиль.",
-      design: "Декоративный постер: крупный заголовок, художественная композиция из простых векторных форм. Минимум текста, акцент на стиль.",
+      concept: "Декоративный постер: художественная композиция из простых форм, крупный заголовок, минимум текста, акцент на стиль.",
+      design: "Design a decorative poster. A large headline, an artistic composition of simple vector shapes, and minimal supporting text. Focus on style and color harmony, not on selling.",
     },
     "ad-billboard": {
-      concept: "Билборд: очень крупный короткий текст, максимальная контрастность и читаемость издалека.",
-      design: "Горизонтальный билборд. Один короткий заголовок (3-5 слов), телефон/сайт мелким, крупный фон. Максимальная контрастность.",
+      concept: "Билборд: один очень короткий заголовок, максимальная контрастность и читаемость издалека.",
+      design: "Design a large billboard. One ultra-short headline (3-5 words) and a phone/website in small but legible text. Use bold high-contrast colors. Avoid decorative clutter — it must read from far away.",
     },
     "social-post": {
-      concept: "Пост для ленты: квадрат, крупный заголовок, 2-3 строки текста, ясный призыв.",
-      design: "Квадратный пост 1080×1080. Заголовок, основной текст 2-3 строки, акцентная кнопка/призыв. Фон — цветной или градиент.",
+      concept: "Пост для ленты: квадрат 1:1, крупный заголовок, 2-3 строки основного текста, ясный CTA.",
+      design: "Design a 1:1 social feed post. A bold headline, 2-3 lines of body text, and a clear CTA button or swipe prompt. Use a solid or gradient background from the palette. Leave clean space around text.",
     },
     "social-stories": {
-      concept: "Stories: вертикальный 9:16, минимум текста по центру, кнопка внизу.",
-      design: "Вертикальная история 1080×1920. Заголовок вверху, кнопка/призыв внизу (свайп вверх), минимум текста по центру.",
+      concept: "Stories: вертикальный 9:16, заголовок сверху, минимум текста по центру, CTA снизу.",
+      design: "Design a 9:16 vertical story. Headline at the top, small central image/illustration or minimal text, and a CTA at the bottom ('swipe up' / 'link'). Keep the middle area open for UI overlays.",
     },
     "social-carousel": {
       concept: "Слайд карусели: квадрат, один тезис + короткое пояснение, простая иконка/цифра.",
-      design: "Квадратный слайд карусели. Один тезис/заголовок, короткое пояснение, простая иконка или цифра. Фон в стиле концепции.",
+      design: "Design a square carousel slide. One clear thesis as the headline, a one-line explanation, and a small icon or number. Keep each slide focused on a single idea. Consistent style across imagined slides.",
     },
     "social-community-cover": {
-      concept: "Обложка сообщества: широкий формат, название и слоган, минимум текста.",
-      design: "Широкая горизонтальная обложка 1920×640. Название сообщества и слоган, минимальная графика. Не перегружай текстом.",
+      concept: "Обложка сообщества: широкий формат, название и слоган, минимум текста, узнаваемость.",
+      design: "Design a wide community cover (1920×640 feel). Community name and tagline on the left, a simple graphic element on the right. Solid or subtle gradient background. Very little text.",
     },
     "branding-logo": {
-      concept: "Логотип: простой знак + название, масштабируемость, минимум деталей.",
-      design: "Логотип/фирменный знак. Название компании крупным шрифтом и простая векторная иконка/знак рядом. Масштабируемый, читаемый, минимум деталей. Фон прозрачный/однотонный.",
+      concept: "Логотип: простой масштабируемый знак + читаемое название, 1-3 цвета, минимум деталей, плоский вектор.",
+      design: "Create a professional logo mark. Combine a simple geometric symbol or lettermark with the brand name as clean text. Use 1-3 flat colors, no shadows, no photorealism, no 3D. It must remain readable at 64×64 px. Transparent background.",
+      transparent: true,
     },
     "branding-business-card": {
       concept: "Визитка: компактная сетка контактов, много воздуха, премиум или минимализм.",
-      design: "Макет визитки 1050×600. Имя/должность, телефон, email, сайт, адрес. Минималистичная сетка, много воздуха, акцентный цвет для имени.",
+      design: "Design a professional business card layout (1050×600). Name and title prominent, contact details (phone, email, website, address) neatly aligned. Use accent color for the name. Plenty of whitespace, clean grid.",
     },
     "branding-certificate": {
-      concept: "Сертификат: элегантный, номинал, золотые/премиум акценты.",
-      design: "Сертификат 1920×1080. Название, номинал, декоративная рамка/орнамент, шрифты с засечками. Сдержанная цветовая палитра.",
+      concept: "Сертификат: элегантный, название, номинал, декоративная рамка, сдержанная премиум-палитра.",
+      design: "Design an elegant certificate (1920×1080). Title at the top, value/recipient text in the center, decorative border or corner ornaments, and signature lines at the bottom. Use serif or classic fonts and a restrained premium palette.",
     },
     "branding-flyer": {
-      concept: "Флаер/листовка: печатный, заголовок, 3-4 преимущества, контакты, CTA.",
-      design: "Листовка A5/А6. Заголовок, 3-4 преимущества, контакты, CTA. Компактная композиция, читаемый шрифт, не перегружай.",
+      concept: "Флаер/листовка: заголовок, 3-4 преимущества, контакты, CTA, компактная печатная композиция.",
+      design: "Design a flyer (A5/A6 proportions). A bold headline, 3-4 short benefits, contacts, and a CTA. Use a clear visual hierarchy, readable fonts, and accent color for the CTA. Do not overcrowd.",
     },
     "branding-gift-certificate": {
-      concept: "Подарочный сертификат: сумма, кому/от кого, праздничные акценты.",
-      design: "Подарочный сертификат с названием, номиналом, полем 'кому/от кого'. Праздничные, но сдержанные акценты.",
+      concept: "Подарочный сертификат: сумма, кому/от кого, праздничные, но сдержанные акценты.",
+      design: "Design a gift certificate. Title, nominal value, and 'to/from' fields. Use festive but tasteful accents (ribbons, soft ornaments). Keep text centered and elegant. Clear space for handwriting or printing.",
     },
     "site-hero-banner": {
-      concept: "Hero-баннер сайта: главный заголовок, подзаголовок, CTA, минимум графики.",
-      design: "Широкий hero-баннер 1920×1080. Главный заголовок, подзаголовок 1-2 строки, кнопка. Минимум графики, акцент на типографику.",
+      concept: "Hero-баннер сайта: главный заголовок, подзаголовок 1-2 строки, CTA, минимум графики, акцент на типографику.",
+      design: "Design a wide hero banner. A large main headline, a 1-2 line subheadline, and a CTA button. Keep graphics minimal — focus on typography and a strong color background or subtle gradient.",
     },
     "site-promo-banner": {
-      concept: "Баннер акции на сайте: скидка, CTA, яркий акцент.",
-      design: "Баннер со скидкой для сайта. Крупный процент скидки, короткий заголовок, кнопка. Яркий акцентный фон.",
+      concept: "Баннер акции на сайте: скидка, CTA, яркий акцент, короткий текст.",
+      design: "Design a website promo banner. The discount is the hero element. Add a short headline and a CTA button. Use a bright accent background from the palette. Keep text short and scannable.",
     },
     "site-icons": {
-      concept: "Набор иконок для интерфейса: монолиния, 24×24, простые формы, сетка 2×3/3×2.",
-      design: "Набор из 4-6 простых иконок 24×24 пикселя в монолинейном стиле, расположенных сеткой 2×3 или 3×2. Однотонный stroke, без заливки, на светлом фоне. Иконки на тему запроса.",
+      concept: "Набор иконок для интерфейса: монолиния, 24×24 feel, простые формы, сетка 2×3/3×2.",
+      design: "Create a set of 4-6 simple UI icons in a monoline or flat style. Arrange them in a 2×3 or 3×2 grid. Use consistent stroke width, simple geometry, no gradients, no shadows. Light background, dark stroke color from the palette.",
+      transparent: true,
     },
     "site-illustrations": {
       concept: "Иллюстрация для сайта: простая векторная сцена, плоский стиль, без мелких деталей.",
-      design: "Иллюстрация для сайта. Простая векторная сцена с персонажем или объектом на тему, плоский стиль, без мелких деталей. Можно с короткой подписью.",
+      design: "Create a simple website illustration. A flat vector scene with a character or object relevant to the topic. Use the brand palette, keep shapes simple, avoid tiny details. Optional short caption.",
     },
   };
 
@@ -451,34 +453,42 @@ async function main() {
   const prompts = [
     {
       key: "conceptGeneration",
-      prompt: `Ты — опытный арт-директор и маркетолог. Проанализируй нишу клиента по его брифу и предложи 4-6 концепций дизайна.
+      prompt: `Ты — старший арт-директор и маркетолог с 15-летним опытом. Проанализируй нишу клиента по его брифу и предложи 4-6 профессиональных концепций дизайна.
+
+Что должно быть в анализе:
+- Краткий разбор ниши, аудитории и конкурентного контекста.
+- Какие цвета, стили и композиции работают в этой нише и почему.
+- Как выделить бренд среди конкурентов.
+
+Что должно быть в каждой концепции:
+- name: 1-3 слова, запоминающееся название концепции.
+- description: 1-2 предложения о визуальном решении.
+- explanation: 1-2 предложения, почему эта концепция подходит именно этому бизнесу/аудитории.
+- palette: 5 конкретных hex-кодов (не плейсхолдеры), подобранных под нишу.
+- recommendations: 3 практических совета по использованию концепции.
 
 Верни ТОЛЬКО JSON-объект вида:
 {
-  "analysis": "2-4 предложения: что работает в нише, какая палитра/стиль подойдут, почему именно так.",
+  "analysis": "...",
   "concepts": [
-    {
-      "name": "1-2 слова",
-      "description": "1-2 предложения",
-      "explanation": "1-2 предложения, почему эта концепция подходит конкретно для этого бизнеса/аудитории",
-      "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"],
-      "recommendations": ["...", "...", "..."]
-    }
+    { "name": "...", "description": "...", "explanation": "...", "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"], "recommendations": ["...", "...", "..."] }
   ]
 }
 
-Без markdown, без пояснений вне JSON.`,
+Без markdown, без текста вне JSON.`,
       description: "Генерация концепций и анализа ниши",
     },
     {
       key: "imageGeneration",
-      prompt: `Профессиональный рекламный дизайн на тему: {topic}. Стиль: {style}. Цвета: {colors}. Текстовые элементы (только если логично вписать): {text}. Избегай лишнего мелкого текста — только крупная композиция.`,
-      description: "Базовый промпт для генерации макетов",
+      prompt: `You are a senior graphic designer. Create a professional, production-ready design as a single self-contained SVG.
+
+Use the brand name, business description, target audience, selected concept, style, and color palette. Follow the design-type instructions. Keep typography clear, use clean vector shapes, leave negative space, and avoid raster images, shadows, 3D, or photorealism unless requested. Output raw SVG 1.1 markup only.`,
+      description: "Базовый системный промпт для генерации макетов",
     },
     {
       key: "imageIdeogram",
-      prompt: `A professional marketing design in {style} style for a business. Theme: {topic}. Use colors: {colors}. Include clear, readable text: {text}. No clutter.`,
-      description: "Базовый промпт для Ideogram",
+      prompt: `A professional marketing design in the requested style for the business. Use the provided brand name, concept, color palette, and text blocks. Clean layout, readable text, no clutter, no raster images. Output as a flat vector design.`,
+      description: "Базовый промпт для внешних image-моделей",
     },
   ];
 

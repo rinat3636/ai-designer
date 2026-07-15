@@ -1,14 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Heart, Trash2, RefreshCw, FileImage, Image as ImageIcon } from "lucide-react";
-import { downloadSvg, downloadRaster } from "@/lib/client-image";
+import { Heart, Trash2, RefreshCw, Download } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { downloadSvg, downloadRaster, getViewBoxSize } from "@/lib/client-image";
+import { getViewBoxForTemplate } from "@/lib/design";
 import type { Generation } from "@/types";
 import type { GenerationImage } from "@prisma/client";
 
@@ -16,6 +25,34 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
   const router = useRouter();
   const [isFavorite, setIsFavorite] = useState(generation.isFavorite);
   const [selected, setSelected] = useState<GenerationImage | null>(generation.images[0] || null);
+
+  const [format, setFormat] = useState<"svg" | "png" | "jpg">("png");
+  const [width, setWidth] = useState<string>("");
+  const [height, setHeight] = useState<string>("");
+
+  // Set default export size from the SVG viewBox when the selected image changes
+  useEffect(() => {
+    if (!selected) return;
+    const baseViewBox = generation.template?.slug
+      ? getViewBoxForTemplate(generation.template.slug)
+      : undefined;
+    const baseSize = baseViewBox ? getViewBoxSize(`<svg viewBox="${baseViewBox}"/>`) : null;
+    setWidth(String(baseSize?.width || 1024));
+    setHeight(String(baseSize?.height || 1024));
+
+    fetch(selected.url)
+      .then((r) => r.text())
+      .then((svg) => {
+        const size = getViewBoxSize(svg);
+        if (size) {
+          setWidth(String(size.width));
+          setHeight(String(size.height));
+        }
+      })
+      .catch(() => {
+        // keep base size fallback
+      });
+  }, [selected, generation.template?.slug]);
 
   async function toggleFavorite() {
     const next = !isFavorite;
@@ -36,19 +73,31 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
     router.refresh();
   }
 
-  async function handleDownload(format: "svg" | "png" | "jpg") {
+  async function handleDownload() {
     if (!selected) return;
     const name = `design-${generation.title || generation.template?.name || generation.id}`;
+
     try {
       if (format === "svg") {
         await downloadSvg(selected.url, `${name}.svg`);
       } else {
-        await downloadRaster(selected.url, `${name}.${format}`, format === "png" ? "image/png" : "image/jpeg");
+        const w = Number(width) || undefined;
+        const h = Number(height) || undefined;
+        const mime = format === "png" ? "image/png" : "image/jpeg";
+        await downloadRaster(selected.url, `${name}.${format}`, mime, w, h);
       }
       toast("Скачивание началось");
     } catch (e) {
       console.error(e);
       toast.error("Не удалось скачать");
+    }
+  }
+
+  function applyPreset(preset: string) {
+    const parts = preset.split("x");
+    if (parts.length === 2) {
+      setWidth(parts[0]);
+      setHeight(parts[1]);
     }
   }
 
@@ -95,16 +144,66 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
               </div>
             )}
           </CardContent>
-          <CardFooter className="flex flex-wrap gap-2 border-t bg-muted/30">
-            <Button size="sm" onClick={() => handleDownload("svg")}>
-              <FileImage className="mr-1 size-4" /> SVG
-            </Button>
-            <Button size="sm" variant="secondary" onClick={() => handleDownload("png")}>
-              <ImageIcon className="mr-1 size-4" /> PNG
-            </Button>
-            <Button size="sm" variant="secondary" onClick={() => handleDownload("jpg")}>
-              <ImageIcon className="mr-1 size-4" /> JPG
-            </Button>
+          <CardFooter className="flex flex-col gap-4 border-t bg-muted/30 p-4">
+            <div className="flex w-full flex-wrap items-end gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-muted-foreground">Формат</label>
+                <Select value={format} onValueChange={(v) => setFormat(v as any)}>
+                  <SelectTrigger className="w-28">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="svg">SVG</SelectItem>
+                    <SelectItem value="png">PNG</SelectItem>
+                    <SelectItem value="jpg">JPG</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {format !== "svg" && (
+                <>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium text-muted-foreground">Ширина, px</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={width}
+                      onChange={(e) => setWidth(e.target.value)}
+                      className="w-28"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium text-muted-foreground">Высота, px</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={height}
+                      onChange={(e) => setHeight(e.target.value)}
+                      className="w-28"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-1 pb-1">
+                    {["1080x1080", "1080x1920", "1200x630", "1920x1080", "1024x1024"].map((preset) => (
+                      <Button
+                        key={preset}
+                        variant="outline"
+                        size="sm"
+                        type="button"
+                        onClick={() => applyPreset(preset)}
+                      >
+                        {preset}
+                      </Button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              <Button className="ml-auto" onClick={handleDownload}>
+                <Download className="mr-1 size-4" /> Скачать
+              </Button>
+            </div>
           </CardFooter>
         </Card>
 
