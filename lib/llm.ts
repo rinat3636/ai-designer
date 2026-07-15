@@ -66,23 +66,29 @@ function getApiConfig() {
 async function callChatCompletionRaw(
   systemPrompt: string,
   messages: ChatMessage[],
-  maxTokens = 4096
+  maxTokens = 4096,
+  jsonMode = false
 ): Promise<string | null> {
   const cfg = getApiConfig();
   if (!cfg) return null;
 
   try {
+    const body: any = {
+      model: cfg.model,
+      messages: [{ role: "system", content: systemPrompt }, ...messages],
+      max_tokens: maxTokens,
+    };
+    if (jsonMode) {
+      body.response_format = { type: "json_object" };
+    }
+
     const res = await fetch(`${cfg.baseURL}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${cfg.apiKey}`,
       },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [{ role: "system", content: systemPrompt }, ...messages],
-        max_tokens: maxTokens,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -102,9 +108,10 @@ async function callChatCompletionRaw(
 async function callChatCompletion(
   systemPrompt: string,
   userPrompt: string,
-  maxTokens = 4096
+  maxTokens = 4096,
+  jsonMode = false
 ): Promise<string | null> {
-  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens);
+  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode);
 }
 
 export async function chatInterview(
@@ -114,7 +121,7 @@ export async function chatInterview(
 ): Promise<InterviewResult> {
   const cfg = getApiConfig();
   if (!cfg) {
-    return fallbackInterview(template, currentData);
+    return heuristicInterview(template, currentData, messages);
   }
 
   const fields = Array.isArray(template.fields)
@@ -124,134 +131,299 @@ export async function chatInterview(
   const conceptHint = template.promptHints?.concept || "";
   const designHint = template.promptHints?.design || "";
 
-  const systemPrompt = `Ты — профессиональный арт-директор и дизайнер. Веди диалог с клиентом, чтобы создать дизайн для типа "${template.name}" (${template.category}).
+  const systemPrompt = `Ты — профессиональный арт-директор и дизайнер. Веди живой диалог с клиентом, чтобы собрать бриф для дизайна: "${template.name}" (${template.category}).
 
-Твоя задача — по одному короткому профессиональному вопросу собрать всё необходимое. Прими любую информацию, которую клиент даёт сам, включая загруженные фото-референсы. Если клиент загружает изображение, прокомментируй, как его можно использовать, и задай уточняющий вопрос.
-
-Не задавай все вопросы сразу — только один за раз. Когда информации достаточно (обычно после 3-6 вопросов), предложи 4-6 концепций дизайна.
+Важные правила:
+1. Задавай ровно один короткий, профессиональный вопрос за раз на русском языке.
+2. Прими любую информацию, которую клиент даёт сам: текст, фото-референсы, пожелания.
+3. Если клиент загружает фото, прокомментируй, что в нём важно, и задай уточняющий вопрос.
+4. Поддерживай диалог — отвечай на сказанное, не повторяй один и тот же вопрос.
+5. После 3-6 вопросов, когда у тебя достаточно данных, предложи 4-6 концепций и заверши диалог.
 
 Справка по типу дизайна:
-- Описание: ${template.description || ""}
-- Подсказка для концепций: ${conceptHint}
-- Подсказка для макета: ${designHint}
+- Описание: ${template.description || "—"}
+- Подсказка для концепций: ${conceptHint || "—"}
+- Подсказка для макета: ${designHint || "—"}
 
-Поля макета, которые нужно собрать (можно спрашивать неявно, через диалог):
+Дополнительные поля макета (заполнять неявно через диалог):
 ${fields || "- нет специфических полей"}
 
-В каждом ответе возвращай ТОЛЬКО JSON строго такого вида, без markdown:
+В каждом ответе возвращай ТОЛЬКО JSON, строго такого вида, без markdown и без текста вне JSON:
 {
   "message": "то, что ты говоришь клиенту (на русском, один вопрос или представление концепций)",
   "extractedData": {
-    "businessDesc": "...",
-    "companyName": "...",
-    "targetAudience": "...",
-    "style": "...",
+    "businessDesc": "чем занимается компания",
+    "companyName": "название",
+    "targetAudience": "аудитория",
+    "style": "стиль",
     "colors": ["#hex", "#hex"],
-    "logoUrl": "...",
+    "logoUrl": "",
     "referenceImages": ["url", "url"],
-    "data": { "headline": "...", "subheadline": "..." }
+    "data": { "headline": "", "subheadline": "" }
   },
   "done": false,
   "analysis": null,
   "concepts": null
 }
 
-Когда готов предложить концепции, установи done: true и верни:
+Когда готов предложить концепции, установи done: true:
 {
   "message": "Вот несколько концепций. Выберите подходящую:",
   "extractedData": { ... },
   "done": true,
-  "analysis": "2-4 предложения анализа ниши",
+  "analysis": "2-4 предложения анализа ниши и стиля",
   "concepts": [
-    { "name": "...", "description": "...", "explanation": "...", "palette": ["#hex", ...], "recommendations": ["..."] }
+    { "name": "1-2 слова", "description": "1-2 предложения", "explanation": "почему подходит", "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"], "recommendations": ["...", "..."] }
   ]
 }
 
-Важно:
-- colors может быть строкой или массивом hex.
-- referenceImages — массив URL загруженных референсов.
-- data — объект с полями макета (headline, subheadline и т.д.).
-- Не показывай JSON клиенту, только message.
+ВАЖНО: JSON должен быть валидным. Если клиент уже ответил на вопрос, обязательно сохрани этот ответ в extractedData и задай следующий вопрос. Не повторяй уже заданный вопрос.
 
-Текущие собранные данные: ${JSON.stringify(currentData)}`;
+currentData на данный момент: ${JSON.stringify(currentData)}`;
 
-  const text = await callChatCompletionRaw(systemPrompt, messages, 4096);
-  if (!text) return fallbackInterview(template, currentData);
+  const text = await callChatCompletionRaw(systemPrompt, messages, 4096, true);
+  if (!text) return heuristicInterview(template, currentData, messages);
 
-  return await parseInterviewResponse(text, template, currentData);
-}
-
-async function parseInterviewResponse(
-  text: string,
-  template: InterviewTemplate,
-  currentData: Record<string, any>
-): Promise<InterviewResult> {
-  const cleaned = text.replace(/```json|```/g, "").trim();
-  const candidates = [cleaned, cleaned.replace(/\r?\n/g, "")];
-
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate);
-      const extractedData = { ...currentData, ...(parsed.extractedData || {}) };
-
-      const result: InterviewResult = {
-        message: String(parsed.message || ""),
-        extractedData,
-        done: Boolean(parsed.done),
-      };
-
-      if (result.done) {
-        result.analysis = typeof parsed.analysis === "string" ? parsed.analysis : undefined;
-        result.concepts = Array.isArray(parsed.concepts)
-          ? parsed.concepts.slice(0, 6).map((c: any) => ({
-              name: String(c.name || "Концепция"),
-              description: String(c.description || ""),
-              explanation: typeof c.explanation === "string" ? c.explanation : undefined,
-              palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
-              recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
-            }))
-          : undefined;
-      }
-
-      return result;
-    } catch {
-      // try next candidate
-    }
+  const result = parseInterviewResponse(text, currentData);
+  if (result) {
+    if (result.done) enrichConcepts(result);
+    return result;
   }
 
-  console.error("Interview parse error", text);
-  return fallbackInterview(template, currentData);
+  // If the model returned natural language, try to reformat via a second call.
+  const repaired = await repairInterviewResponse(text, messages, template, currentData);
+  if (repaired) {
+    if (repaired.done) enrichConcepts(repaired);
+    return repaired;
+  }
+
+  return heuristicInterview(template, currentData, messages);
 }
 
-async function fallbackInterview(
+function extractJson(text: string): string | null {
+  text = text.replace(/```json|```/g, "").trim();
+
+  // Try to find the largest balanced { ... } or [ ... ] block.
+  const startObj = text.indexOf("{");
+  const startArr = text.indexOf("[");
+
+  if (startObj === -1 && startArr === -1) return null;
+
+  const start = startObj === -1 ? startArr : startArr === -1 ? startObj : Math.min(startObj, startArr);
+  const isArray = text[start] === "[";
+  const openChar = isArray ? "[" : "{";
+  const closeChar = isArray ? "]" : "}";
+
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === openChar) depth++;
+    if (text[i] === closeChar) depth--;
+    if (depth === 0) return text.slice(start, i + 1);
+  }
+
+  return null;
+}
+
+function parseInterviewResponse(text: string, currentData: Record<string, any>): InterviewResult | null {
+  const jsonStr = extractJson(text);
+  if (!jsonStr) return null;
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    const extractedData = { ...currentData, ...(parsed.extractedData || {}) };
+    normalizeColors(extractedData);
+    normalizeImages(extractedData);
+
+    const result: InterviewResult = {
+      message: String(parsed.message || ""),
+      extractedData,
+      done: Boolean(parsed.done),
+    };
+
+    if (result.done) {
+      result.analysis = typeof parsed.analysis === "string" ? parsed.analysis : undefined;
+      result.concepts = Array.isArray(parsed.concepts)
+        ? parsed.concepts.slice(0, 6).map((c: any) => ({
+            name: String(c.name || "Концепция"),
+            description: String(c.description || ""),
+            explanation: typeof c.explanation === "string" ? c.explanation : undefined,
+            palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
+            recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
+          }))
+        : undefined;
+    }
+
+    return result;
+  } catch (e) {
+    console.error("Interview parse error", text, e);
+    return null;
+  }
+}
+
+async function repairInterviewResponse(
+  rawAssistantText: string,
+  messages: ChatMessage[],
   template: InterviewTemplate,
   currentData: Record<string, any>
-): Promise<InterviewResult> {
-  if (!currentData.businessDesc && !currentData.companyName) {
+): Promise<InterviewResult | null> {
+  const system = `The assistant is conducting a design interview and should have returned only JSON, but returned natural language. Convert the assistant's message to a proper JSON object following this schema:
+{
+  "message": "a short professional Russian question or concept presentation based on the assistant text",
+  "extractedData": { "businessDesc": "...", "companyName": "...", "targetAudience": "...", "style": "...", "colors": ["#hex"], "logoUrl": "", "referenceImages": ["url"], "data": {} },
+  "done": false,
+  "analysis": null,
+  "concepts": null
+}
+If the conversation contains enough info to propose concepts, set done: true, include analysis and 4-6 concepts. Use template: ${template.name} (${template.category}).`;
+
+  const repairMessages: ChatMessage[] = [
+    ...messages,
+    { role: "assistant", content: rawAssistantText },
+    { role: "user", content: "Return the response as valid JSON only." },
+  ];
+
+  const text = await callChatCompletionRaw(system, repairMessages, 4096, true);
+  if (!text) return null;
+  return parseInterviewResponse(text, currentData);
+}
+
+function normalizeColors(data: Record<string, any>) {
+  if (data.colors == null) return;
+  if (typeof data.colors === "string") {
+    data.colors = data.colors
+      .split(/[,;]/)
+      .map((c: string) => c.trim())
+      .filter(Boolean);
+  }
+  if (Array.isArray(data.colors)) {
+    data.colors = data.colors.map(String).filter((c: string) => c.length > 0);
+  }
+}
+
+function normalizeImages(data: Record<string, any>) {
+  if (!Array.isArray(data.referenceImages)) {
+    data.referenceImages = [];
+  } else {
+    data.referenceImages = data.referenceImages.map(String);
+  }
+}
+
+function enrichConcepts(result: InterviewResult) {
+  if (!result.concepts || result.concepts.length === 0) return;
+
+  const baseColors = Array.isArray(result.extractedData.colors) ? result.extractedData.colors.map(String) : [];
+  const neutrals = ["#0f172a", "#f8fafc", "#94a3b8", "#64748b", "#cbd5e1"];
+
+  result.concepts = result.concepts.map((c, i) => {
+    let palette = Array.isArray(c.palette) && c.palette.length > 0 ? c.palette.map(String) : [];
+    const fallbackPalette = ["#2563eb", "#f8fafc", "#0f172a"];
+    // If palette looks like the default placeholder, rebuild from extracted colors.
+    if (
+      palette.length === 0 ||
+      (palette.length === fallbackPalette.length && palette.every((v, idx) => v === fallbackPalette[idx]))
+    ) {
+      const rotated = [...baseColors.slice(i % baseColors.length), ...baseColors.slice(0, i % baseColors.length)];
+      palette = [...rotated, ...neutrals].slice(0, 5);
+      if (palette.length < 3) {
+        palette = ["#2563eb", "#0f172a", "#f8fafc", "#94a3b8", "#64748b"];
+      }
+    }
+
+    const recommendations =
+      Array.isArray(c.recommendations) && c.recommendations.length > 0
+        ? c.recommendations.map(String)
+        : ["Сохранить читаемость в малых размерах", "Использовать фирменные цвета", "Адаптировать под соцсети и печать"];
+
     return {
-      message: "Расскажите, пожалуйста, чем занимается ваша компания? Это поможет мне подобрать правильный стиль.",
-      extractedData: currentData,
+      ...c,
+      palette,
+      recommendations,
+      explanation: c.explanation || c.description,
+    };
+  });
+}
+
+async function heuristicInterview(
+  template: InterviewTemplate,
+  currentData: Record<string, any>,
+  messages: ChatMessage[]
+): Promise<InterviewResult> {
+  const lastUser = messages
+    .slice()
+    .reverse()
+    .find((m) => m.role === "user");
+  const lastUserText = extractTextFromMessage(lastUser);
+
+  // Try to understand the latest answer.
+  const updated = { ...currentData };
+  if (lastUserText && !updated.businessDesc) {
+    updated.businessDesc = lastUserText;
+  } else if (lastUserText && !updated.companyName) {
+    updated.companyName = lastUserText;
+  } else if (lastUserText && !updated.targetAudience) {
+    updated.targetAudience = lastUserText;
+  } else if (lastUserText && !updated.style) {
+    updated.style = lastUserText;
+  }
+
+  if (!updated.businessDesc) {
+    return {
+      message: "Расскажите, пожалуйста, чем занимается ваша компания? Это поможет подобрать правильный стиль.",
+      extractedData: updated,
+      done: false,
+    };
+  }
+  if (!updated.companyName) {
+    return {
+      message: "Как называется компания?",
+      extractedData: updated,
+      done: false,
+    };
+  }
+  if (!updated.targetAudience) {
+    return {
+      message: "Кто ваша целевая аудитория?",
+      extractedData: updated,
+      done: false,
+    };
+  }
+  if (!updated.style && !updated.colors?.length) {
+    return {
+      message: "Есть ли пожелания по стилю или фирменным цветам?",
+      extractedData: updated,
       done: false,
     };
   }
 
-  const brief: Brief = {
-    businessDesc: currentData.businessDesc || "",
-    companyName: currentData.companyName || "",
-    website: currentData.website || "",
-    targetAudience: currentData.targetAudience || "",
-    style: currentData.style || "",
-    colors: Array.isArray(currentData.colors) ? currentData.colors : [],
-    logoUrl: currentData.logoUrl || (currentData.referenceImages?.[0] || ""),
-  };
-
+  const brief = buildBrief(updated);
   const conceptResult = await generateConcepts(brief, template);
   return {
     message: "Вот несколько концепций. Выберите подходящую:",
-    extractedData: currentData,
+    extractedData: updated,
     done: true,
     analysis: conceptResult.analysis,
     concepts: conceptResult.concepts,
+  };
+}
+
+function extractTextFromMessage(message?: ChatMessage): string {
+  if (!message) return "";
+  if (typeof message.content === "string") return message.content;
+  const parts = message.content as ChatContentPart[];
+  const textPart = parts.find((p) => p.type === "text");
+  return textPart?.type === "text" ? textPart.text : "";
+}
+
+function buildBrief(data: Record<string, any>): Brief {
+  const colors = Array.isArray(data.colors) ? data.colors.map(String) : [];
+  return {
+    businessDesc: data.businessDesc || "",
+    companyName: data.companyName || "",
+    website: data.website || "",
+    targetAudience: data.targetAudience || "",
+    style: data.style || "",
+    colors,
+    logoUrl: data.logoUrl || data.referenceImages?.[0] || "",
   };
 }
 
@@ -300,7 +472,7 @@ export async function generateConcepts(
 
 Сначала проведи краткий анализ ниши, затем предложи концепции. Верни ТОЛЬКО JSON.`;
 
-  const text = await callChatCompletion(systemPrompt, userPrompt);
+  const text = await callChatCompletion(systemPrompt, userPrompt, 4096, true);
   if (text) {
     try {
       return parseConcepts(text);
@@ -313,31 +485,22 @@ export async function generateConcepts(
 }
 
 function parseConcepts(text: string): ConceptGenerationResult {
-  const cleaned = text.replace(/```json|```/g, "").trim();
-  const candidates = [cleaned, cleaned.replace(/\r?\n/g, "")];
+  const jsonStr = extractJson(text);
+  if (!jsonStr) throw new Error("No JSON found");
 
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate);
-      const concepts = Array.isArray(parsed.concepts) ? parsed.concepts : parsed;
-      if (!Array.isArray(concepts)) throw new Error("invalid concepts");
-      return {
-        analysis: typeof parsed.analysis === "string" ? parsed.analysis : undefined,
-        concepts: concepts.slice(0, 6).map((c: any) => ({
-          name: String(c.name || "Концепция"),
-          description: String(c.description || ""),
-          explanation: typeof c.explanation === "string" ? c.explanation : undefined,
-          palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
-          recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
-        })),
-      };
-    } catch {
-      // try next candidate
-    }
-  }
-
-  console.error("Concept parse error", text);
-  return fallbackConcepts();
+  const parsed = JSON.parse(jsonStr);
+  const concepts = Array.isArray(parsed.concepts) ? parsed.concepts : parsed;
+  if (!Array.isArray(concepts)) throw new Error("invalid concepts");
+  return {
+    analysis: typeof parsed.analysis === "string" ? parsed.analysis : undefined,
+    concepts: concepts.slice(0, 6).map((c: any) => ({
+      name: String(c.name || "Концепция"),
+      description: String(c.description || ""),
+      explanation: typeof c.explanation === "string" ? c.explanation : undefined,
+      palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
+      recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
+    })),
+  };
 }
 
 function fallbackConcepts(): ConceptGenerationResult {
@@ -425,7 +588,6 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
   const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/i);
   if (!svgMatch) return null;
   let svg = svgMatch[0];
-  // Ensure XML namespace if missing
   if (!svg.includes("xmlns=")) {
     svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
   }
