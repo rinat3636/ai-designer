@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { promptToPngDataUrl } from "./prompt-image";
+import { memoryToPromptText, type MemorySnapshot } from "./memory";
 import { applySvgOps, listElementIds, SvgOp } from "./svg-edit";
 import { injectQrCode } from "./qr";
 
@@ -179,19 +180,13 @@ async function callChatCompletion(
   return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal, temperature);
 }
 
-export type ProjectMemorySnapshot = {
-  niche?: string | null;
-  companyName?: string | null;
-  style?: string | null;
-  palette?: unknown;
-  contacts?: unknown;
-};
+export type ProjectMemorySnapshot = MemorySnapshot;
 
 export async function chatInterview(
   messages: ChatMessage[],
   template: InterviewTemplate,
   currentData: Record<string, any> = {},
-  memory?: ProjectMemorySnapshot | null
+  memory?: MemorySnapshot | null
 ): Promise<InterviewResult> {
   const cfg = getApiConfig();
   if (!cfg) {
@@ -261,26 +256,24 @@ ${fields || "- нет специфических полей"}
 ВАЖНО: JSON должен быть валидным. Сохраняй уже собранные данные из currentData. Если клиент дал информацию — обязательно перенеси её в extractedData. Не задавай похожие вопросы подряд.
 
 currentData на данный момент: ${JSON.stringify(currentData)}${
-    memory && (memory.niche || memory.companyName || memory.style)
-      ? `\n\nПамять о клиенте из прошлых проектов (используй её, НЕ задавай повторно вопросы о нише, названии, стиле и контактах, если они уже известны): ${JSON.stringify(memory)}`
-      : ""
+    memory ? `\n\nПамять о клиенте из прошлых проектов (используй её, НЕ задавай повторно вопросы о нише, названии, стиле, контактах и предпочтениях, если они уже известны):\n${memoryToPromptText(memory)}` : ""
   }`;
 
   const text = await callChatCompletionRaw(systemPrompt, messages, 4096, true);
-  if (!text) return finishOrAsk(template, currentData, messages);
+  if (!text) return finishOrAsk(template, currentData, messages, undefined, memory);
 
   const parsed = parseInterviewResponse(text, currentData);
-  const result = parsed ? await finishOrAsk(template, currentData, messages, parsed) : null;
+  const result = parsed ? await finishOrAsk(template, currentData, messages, parsed, memory) : null;
   if (result) return result;
 
   // If the model returned natural language, try to reformat via a second call.
   const repaired = await repairInterviewResponse(text, messages, template, currentData);
   if (repaired) {
-    const repairedResult = await finishOrAsk(template, currentData, messages, repaired);
+    const repairedResult = await finishOrAsk(template, currentData, messages, repaired, memory);
     if (repairedResult) return repairedResult;
   }
 
-  return finishOrAsk(template, currentData, messages);
+  return finishOrAsk(template, currentData, messages, undefined, memory);
 }
 
 function hasEnoughData(data: Record<string, any>): boolean {
@@ -297,7 +290,8 @@ async function finishOrAsk(
   template: InterviewTemplate,
   currentData: Record<string, any>,
   messages: ChatMessage[],
-  candidate?: InterviewResult
+  candidate?: InterviewResult,
+  memory?: MemorySnapshot | null
 ): Promise<InterviewResult> {
   const data = { ...(candidate?.extractedData || currentData) };
 
@@ -338,7 +332,7 @@ async function finishOrAsk(
   }
 
   const brief = buildBrief(data);
-  const conceptResult = await generateConcepts(brief, template);
+  const conceptResult = await generateConcepts(brief, template, memory);
   const result: InterviewResult = {
     message: "Вот несколько концепций. Выберите подходящую:",
     extractedData: data,
@@ -521,8 +515,10 @@ function buildBrief(data: Record<string, any>): Brief {
 
 export async function generateConcepts(
   brief: Brief,
-  template?: { slug: string; name: string; category: string; promptHints?: any } | null
+  template?: { slug: string; name: string; category: string; promptHints?: any } | null,
+  memory?: MemorySnapshot | null
 ): Promise<ConceptGenerationResult> {
+  const showAnalysis = process.env.NEXT_PUBLIC_SHOW_NICHE_ANALYSIS === "true";
   const promptConfig = await prisma.promptConfig.findUnique({
     where: { key: "conceptGeneration" },
   });
@@ -530,8 +526,7 @@ export async function generateConcepts(
     promptConfig?.prompt ||
     `Ты — опытный арт-директор. Предложи 3 лаконичные концепции дизайна. Верни ТОЛЬКО JSON-объект вида:
 {
-  "analysis": "1-2 коротких предложения: что работает в нише и какая палитра/стиль подойдут.",
-  "concepts": [
+${showAnalysis ? `  "analysis": "1-2 коротких предложения: что работает в нише и какая палитра/стиль подойдут.",\n` : ""}  "concepts": [
     {
       "name": "1-2 слова",
       "description": "1 предложение",
@@ -552,7 +547,7 @@ export async function generateConcepts(
   const templateLine = template
     ? `\n- Тип дизайна: ${template.name} (${template.category})`
     : "";
-  const userPrompt = `Бриф клиента:
+  const userPrompt = `${memory ? `${memoryToPromptText(memory)}\n\n` : ""}Бриф клиента:
 - Название: ${brief.companyName || "—"}
 - Чем занимается: ${brief.businessDesc || "—"}
 - Сайт: ${brief.website || "—"}
@@ -560,7 +555,7 @@ export async function generateConcepts(
 - Предпочитаемый стиль: ${brief.style || "—"}
 - Фирменные цвета: ${brief.colors?.join(", ") || "—"}${templateLine}
 
-Сначала проведи краткий анализ ниши, затем предложи концепции. Верни ТОЛЬКО JSON.`;
+${showAnalysis ? "Сначала проведи краткий анализ ниши, затем " : ""}Предложи концепции. Верни ТОЛЬКО JSON.`;
 
   const text = await callChatCompletion(systemPrompt, userPrompt, 2500, true, undefined, 0.5);
   if (text) {
@@ -729,6 +724,7 @@ export type DesignGenerationInput = {
   sourceSvg?: string;
   referenceImages?: string[];
   referenceStyle?: string;
+  memory?: MemorySnapshot;
 };
 
 export async function generateDesigns(
@@ -797,7 +793,8 @@ export function matchStylePreset(text: string): string | null {
 async function parseEditInstruction(
   input: DesignGenerationInput,
   instruction: string,
-  messages: ChatMessage[] = []
+  messages: ChatMessage[] = [],
+  memory?: MemorySnapshot
 ): Promise<EditParseResult> {
   const system = `You are a smart AI designer-assistant in a chat conversation. The user is working on a design of type "${input.template.name}" (${input.template.category}). You understand natural, informal speech — the user never has to use special commands.
 
@@ -827,7 +824,7 @@ Output valid JSON with these fields:
     .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
     .join("\n");
 
-  const user = `Current data:\n${JSON.stringify(input.data, null, 2)}\n\nConversation history:\n${history || "(no previous messages)"}\n\nLatest user request: "${instruction}"\n\nOutput JSON only.`;
+  const user = `${memory ? `${memoryToPromptText(memory)}\n\n` : ""}Current data:\n${JSON.stringify(input.data, null, 2)}\n\nConversation history:\n${history || "(no previous messages)"}\n\nLatest user request: "${instruction}"\n\nOutput JSON only.`;
 
   const text = await callChatCompletion(system, user, 4096, true);
   const fallback: EditParseResult = {
@@ -886,11 +883,12 @@ export async function editDesigns(
   sourceSvg?: string,
   referenceImages?: string[],
   messages: ChatMessage[] = [],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  memory?: MemorySnapshot
 ): Promise<{ svg: string; label: string; clarificationQuestion?: string; chatReply?: string; revert?: boolean }[]> {
   if (!getApiConfig()) return [];
 
-  const parsed = await parseEditInstruction(input, instruction, messages);
+  const parsed = await parseEditInstruction(input, instruction, messages, memory);
   if (parsed.intent === "revert") {
     return [{ svg: "", label: "", revert: true, chatReply: parsed.responseToUser || "Вернул предыдущий вариант." }];
   }
@@ -939,6 +937,7 @@ export async function editDesigns(
     editNote: presetRules ? `${parsed.editSummary}\nStyle rules to apply: ${presetRules}` : parsed.editSummary,
     sourceSvg,
     referenceImages,
+    memory,
   };
 
   return generateDesigns(updatedInput, count, signal);
@@ -1058,6 +1057,8 @@ Be precise with text. Do not invent text that is not visible.`;
   }
 }
 
+const MAX_IMAGE_DIMENSION = 1024;
+
 async function imageUrlToBase64(url: string): Promise<string | null> {
   try {
     if (url.startsWith("data:")) return url;
@@ -1072,6 +1073,19 @@ async function imageUrlToBase64(url: string): Promise<string | null> {
     } else {
       return null;
     }
+
+    // Resize large images to reduce vision-token cost and model latency.
+    try {
+      const { default: sharp } = await import("sharp");
+      const resized = await sharp(buffer)
+        .resize(MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION, { fit: "inside" })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+      buffer = resized;
+    } catch {
+      // keep original if sharp fails
+    }
+
     const ext = path.extname(url.split("?")[0]).toLowerCase();
     let mime = "image/png";
     if (ext === ".jpg" || ext === ".jpeg") mime = "image/jpeg";
@@ -1098,6 +1112,7 @@ ${STABLE_IDS_RULE}
 ${DESIGN_QUALITY_RULES}`;
 
   const userPrompt = isEdit ? buildEditPrompt(input) : buildDesignPrompt(input);
+  const maxTokens = isEdit ? 8000 : 12000;
 
   async function attempt(): Promise<string | null> {
     let text: string | null = null;
@@ -1111,15 +1126,15 @@ ${DESIGN_QUALITY_RULES}`;
       if (refs.length) {
         content.push(...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })));
       }
-      text = await callChatCompletion(system, content, 12000, false, undefined, isEdit ? 0 : 0.7);
+      text = await callChatCompletion(system, content, maxTokens, false, undefined, isEdit ? 0 : 0.7);
     } else if (refs.length) {
       const content: ChatContentPart[] = [
         { type: "text", text: userPrompt },
         ...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })),
       ];
-      text = await callChatCompletion(system, content, 12000, false, undefined, isEdit ? 0 : 0.7);
+      text = await callChatCompletion(system, content, maxTokens, false, undefined, isEdit ? 0 : 0.7);
     } else {
-      text = await callChatCompletion(system, userPrompt, 12000, false, undefined, isEdit ? 0 : 0.7);
+      text = await callChatCompletion(system, userPrompt, maxTokens, false, undefined, isEdit ? 0 : 0.7);
     }
     if (!text) return null;
 
@@ -1132,8 +1147,8 @@ ${DESIGN_QUALITY_RULES}`;
     if (!svg.includes("xmlns=")) {
       svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
     }
-    if (!passesQualityCheck(svg)) {
-      console.warn(`Design #${variantIndex + 1} failed quality check`);
+    if (!passesQualityCheck(svg, `variant ${variantIndex + 1}`)) {
+      console.warn(`Design #${variantIndex + 1} failed quality check. SVG:\n${svg.slice(0, 1000)}`);
       return null;
     }
     return svg;
@@ -1175,17 +1190,32 @@ async function visualReviewSvg(svg: string): Promise<string | null> {
   }
 }
 
-function passesQualityCheck(svg: string): boolean {
-  if (!/viewBox\s*=\s*"[\d\s.,-]+"/i.test(svg)) return false;
-  if (/\bNaN\b|undefined/.test(svg)) return false;
+function passesQualityCheck(svg: string, label = "svg"): boolean {
+  if (!/viewBox\s*=\s*"[\d\s.,-]+"/i.test(svg)) {
+    console.warn(`Quality fail (${label}): missing viewBox`);
+    return false;
+  }
+  if (/\bNaN\b|undefined/.test(svg)) {
+    console.warn(`Quality fail (${label}): NaN/undefined`);
+    return false;
+  }
   for (const tag of ["g", "defs", "text", "tspan", "svg"]) {
     const open = (svg.match(new RegExp(`<${tag}[\\s>]`, "gi")) || []).length;
     const close = (svg.match(new RegExp(`</${tag}>`, "gi")) || []).length;
     const selfClosed = (svg.match(new RegExp(`<${tag}[^>]*/>`, "gi")) || []).length;
-    if (open !== close + selfClosed) return false;
+    if (open !== close + selfClosed) {
+      console.warn(`Quality fail (${label}): unbalanced <${tag}> (open=${open}, close=${close}, selfClosed=${selfClosed})`);
+      return false;
+    }
   }
-  if (!passesContrastCheck(svg)) return false;
-  if (!passesBoundsCheck(svg)) return false;
+  if (!passesContrastCheck(svg)) {
+    console.warn(`Quality fail (${label}): contrast`);
+    return false;
+  }
+  if (!passesBoundsCheck(svg)) {
+    console.warn(`Quality fail (${label}): bounds`);
+    return false;
+  }
   return true;
 }
 
@@ -1314,9 +1344,11 @@ function buildDesignPrompt(input: DesignGenerationInput): string {
   const preset = matchStylePreset(`${brief.style || ""} ${data.editInstruction || ""}`);
   const presetNote = preset ? `\nStyle rules: ${preset}` : "";
 
+  const memoryNote = input.memory ? `\n${memoryToPromptText(input.memory)}` : "";
+
   return `Create a ${role} for "${brief.companyName || template.name}".
 Business: ${trunc(brief.businessDesc, 80) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 50)}. Palette: ${concept.palette.join(", ")}.
-Template: ${template.name}.${designHint}${transparentNote}${referenceNote}${presetNote}
+Template: ${template.name}.${designHint}${transparentNote}${referenceNote}${presetNote}${memoryNote}
 viewBox="${viewBox}" (${w}×${h}).${textBlocks ? "\n" + textBlocks : ""}
 Output raw SVG only.`;
 }
@@ -1330,11 +1362,12 @@ function buildEditPrompt(input: DesignGenerationInput): string {
     .map(([k, v]) => `${fieldLabel(k)}: ${v}`)
     .join("\n");
 
-  let body = `Apply ONLY the requested change and return the full updated SVG. Keep the same viewBox "${viewBox}". Do not redesign, do not add or remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so.`;
+  let body = `Apply ONLY the requested change and return the full updated SVG. Keep the same viewBox "${viewBox}". Preserve the original text exactly: do not rewrite, translate, or stylize it. Preserve the original text colors; only change a text color if the new background makes it hard to read, and then only to keep the text clearly readable. Do not redesign, do not add or remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so.`;
 
   if (textBlocks) body += `\nText/content to keep exactly as-is:\n${textBlocks}`;
   if (input.sourceSvg) body += `\n\nCURRENT SVG TO EDIT:\n${input.sourceSvg}`;
   if (hasImage && !input.sourceSvg) body += `\n\nThe current design is shown in the attached image(s). Recreate it as an SVG faithfully: copy the exact visible text, layout, colors, and composition, then apply ONLY the requested change. Do not use generic placeholder text such as "Design Title" or "Subtitle" — use the real text from the image.`;
+  if (input.memory) body += `\n\nUser preferences and history (follow them, avoid repeating past mistakes):\n${memoryToPromptText(input.memory)}`;
 
   body += `\n\nChange to apply: ${input.editNote}\n\nReturn the updated SVG only.`;
   return body;

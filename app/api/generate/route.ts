@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { generateDesigns, analyzeImage, type Brief, type Concept } from "@/lib/llm";
 import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
 import { saveSvg, readLocalSvg, readLocalImageSize } from "@/lib/storage";
+import { buildMemorySnapshot, rememberGenerationFacts } from "@/lib/memory";
 
 export const maxDuration = 300;
 
@@ -44,31 +45,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // When editing from a raster image, analyze it to extract visible text and
-    // elements so the generator can reproduce the design faithfully.
+    // For raster edits the image itself is sent to the model, so we skip the
+    // separate text-extraction step to keep response times reasonable.
     let enrichedBrief = brief as Brief;
-    let enrichedData = (data || {}) as Record<string, string>;
+    const enrichedData = (data || {}) as Record<string, string>;
     let referenceStyle = "";
-    if (editNote && !sourceSvg && nonSvgRefs.length > 0) {
-      try {
-        const analysis = await analyzeImage(nonSvgRefs[0]);
-        const text = analysis.text || analysis.description || "";
-        if (text) {
-          enrichedData = { ...enrichedData, extractedText: text };
-          if (analysis.composition) {
-            enrichedData = { ...enrichedData, layoutDescription: analysis.composition };
-          }
-          if (!enrichedBrief.businessDesc?.trim()) {
-            enrichedBrief = { ...enrichedBrief, businessDesc: analysis.description || "Загруженный макет" };
-          }
-          if (analysis.colors?.length && !enrichedBrief.colors?.length) {
-            enrichedBrief = { ...enrichedBrief, colors: analysis.colors };
-          }
-        }
-      } catch (e) {
-        console.warn("Image analysis failed", e);
-      }
-    } else if (!editNote && nonSvgRefs.length > 0) {
+    if (!editNote && nonSvgRefs.length > 0) {
       // Reference image for a fresh generation: extract style, palette,
       // composition and typography so the model matches the reference mood.
       try {
@@ -162,6 +144,8 @@ export async function POST(request: NextRequest) {
       if (dims) viewBox = `0 0 ${dims.width} ${dims.height}`;
     }
 
+    const memory = await buildMemorySnapshot(user.id);
+
     const designs = await generateDesigns(
       {
         brief: enrichedBrief,
@@ -178,6 +162,7 @@ export async function POST(request: NextRequest) {
         sourceSvg: sourceSvg || undefined,
         referenceImages: nonSvgRefs,
         referenceStyle: referenceStyle || undefined,
+        memory,
       },
       Math.max(1, Math.min(2, Number(count) || 1))
     );
@@ -222,23 +207,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Persist project memory so future dialogs don't re-ask known facts.
-    const memoryData = {
-      niche: (brief as Brief).businessDesc || undefined,
-      companyName: (brief as Brief).companyName || undefined,
-      style: (brief as Brief).style || (concept as Concept).name || undefined,
-      palette: ((concept as Concept).palette || []) as any,
-      contacts: {
-        phone: (data?.phone as string) || undefined,
-        website: (data?.website as string) || (brief as Brief).website || undefined,
-        address: (data?.address as string) || undefined,
-      } as any,
-      files: rawRefs as any,
-    };
-    await prisma.projectMemory.upsert({
-      where: { userId: user.id },
-      update: memoryData,
-      create: { userId: user.id, ...memoryData },
-    });
+    await rememberGenerationFacts(
+      user.id,
+      enrichedBrief,
+      enrichedData,
+      (concept as Concept).name,
+      rawRefs
+    );
 
     await prisma.adminLog.create({
       data: {

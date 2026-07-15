@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { editDesigns, type Brief, type Concept, type DesignGenerationInput } from "@/lib/llm";
 import { getViewBoxForTemplate } from "@/lib/design";
 import { saveSvg, removeGenerationFiles, readLocalSvg } from "@/lib/storage";
+import { buildMemorySnapshot, recordEditOutcome } from "@/lib/memory";
 
 export async function GET(
   _request: NextRequest,
@@ -103,6 +104,8 @@ export async function POST(
       ? `0 0 ${data.size.split("x")[0]} ${data.size.split("x")[1]}`
       : getViewBoxForTemplate(generation.template.slug);
 
+  const memory = await buildMemorySnapshot(user.id);
+
   const input: DesignGenerationInput = {
     brief,
     concept,
@@ -114,6 +117,7 @@ export async function POST(
       promptHints: generation.template.promptHints as any,
     },
     viewBox,
+    memory,
   };
 
   const history = Array.isArray(generation.chatHistory) ? (generation.chatHistory as any[]) : [];
@@ -132,7 +136,9 @@ export async function POST(
       Math.max(1, Math.min(2, Number(count) || 2)),
       sourceSvg,
       referenceImages,
-      chatMessages
+      chatMessages,
+      undefined,
+      memory
     );
 
     const special = designs.find((d) => d.chatReply || d.revert);
@@ -147,6 +153,11 @@ export async function POST(
             { role: "assistant", content: special.chatReply, at: new Date().toISOString() },
           ],
         },
+      });
+      await recordEditOutcome(user.id, {
+        instruction,
+        outcome: "revert",
+        generationId: generation.id,
       });
       return NextResponse.json({ assistantMessage: special.chatReply, revert: Boolean(special.revert) });
     }
@@ -192,6 +203,13 @@ export async function POST(
       });
       createdImages.push(img);
     }
+
+    await recordEditOutcome(user.id, {
+      instruction,
+      outcome: "success",
+      generationId: generation.id,
+      imageUrl: createdImages[0]?.url,
+    });
 
     await prisma.generation.update({
       where: { id },

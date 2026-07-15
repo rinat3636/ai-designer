@@ -297,6 +297,31 @@ export function CreateWizard({
     };
   }
 
+  async function recordMemory(action: string, payload?: Record<string, any>) {
+    try {
+      await fetch("/api/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, payload: payload || {} }),
+      });
+    } catch {
+      // Silent: memory logging is best-effort.
+    }
+  }
+
+  async function safeJson(res: Response): Promise<any> {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      const isHtml = text.trim().toLowerCase().startsWith("<!doctype") || text.trim().startsWith("<");
+      if (isHtml || res.status >= 500) {
+        throw new Error("Сервис генерации временно недоступен. Попробуйте ещё раз через несколько секунд.");
+      }
+      throw new Error(text?.slice(0, 120) || `Сервис временно недоступен (HTTP ${res.status}). Попробуйте ещё раз.`);
+    }
+  }
+
   async function uploadFile(file: File): Promise<{ url: string; width: number; height: number } | null> {
     setUploading(true);
     setError("");
@@ -304,7 +329,7 @@ export function CreateWizard({
     formData.append("file", file);
     try {
       const res = await fetch("/api/upload", { method: "POST", body: formData });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error);
       return { url: json.url, width: json.width || 0, height: json.height || 0 };
     } catch (e: any) {
@@ -343,7 +368,7 @@ export function CreateWizard({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text }),
         });
-        const json = await res.json();
+        const json = await safeJson(res);
         if (!res.ok) throw new Error(json.error);
         const resolved = templates.find((t) => t.id === json.templateId);
         if (!resolved) {
@@ -370,7 +395,7 @@ export function CreateWizard({
             currentData: nextData,
           }),
         });
-        const interviewJson = await interviewRes.json();
+        const interviewJson = await safeJson(interviewRes);
         if (!interviewRes.ok) throw new Error(interviewJson.error);
 
         setCurrentData((prev) => ({ ...prev, ...(interviewJson.extractedData || {}) }));
@@ -450,7 +475,7 @@ export function CreateWizard({
           currentData,
         }),
       });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error);
 
       setCurrentData((prev) => ({ ...prev, ...(json.extractedData || {}) }));
@@ -490,7 +515,7 @@ export function CreateWizard({
           count: 1,
         }),
       });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) {
         if (res.status === 403) {
           toast.error(json.error || "Лимит генераций исчерпан. Перейдите на другой тариф.");
@@ -558,7 +583,7 @@ export function CreateWizard({
           count: 1,
         }),
       });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) {
         if (res.status === 403) {
           toast.error(json.error || "Лимит генераций исчерпан. Перейдите на другой тариф.");
@@ -603,7 +628,7 @@ export function CreateWizard({
           count: 2,
         }),
       });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error);
 
       if (json.revert) {
@@ -672,6 +697,20 @@ export function CreateWizard({
   }
 
   function handleCreateSimilar() {
+    if (selectedResultImage && generation) {
+      const concept = (generation.concept as any) || {};
+      const brief = (generation.brief as any) || {};
+      void recordMemory("like", {
+        url: selectedResultImage.url,
+        generationId: generation.id,
+        imageId: selectedResultImage.id,
+        templateSlug: generation.template?.slug,
+        conceptName: concept.name,
+        style: brief.style || concept.name,
+        palette: concept.palette || [],
+        reason: "create similar",
+      });
+    }
     sendEditInstruction("Сделай похожий вариант с небольшими отличиями", true);
   }
 
@@ -731,7 +770,7 @@ export function CreateWizard({
   }
 
   async function toggleFavorite() {
-    if (!generation) return;
+    if (!generation || !selectedResultImage) return;
     const next = !isFavorite;
     setIsFavorite(next);
     await fetch(`/api/projects/${generation.id}`, {
@@ -739,6 +778,20 @@ export function CreateWizard({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ isFavorite: next }),
     });
+    if (next) {
+      const concept = (generation.concept as any) || {};
+      const brief = (generation.brief as any) || {};
+      void recordMemory("like", {
+        url: selectedResultImage.url,
+        generationId: generation.id,
+        imageId: selectedResultImage.id,
+        templateSlug: generation.template?.slug,
+        conceptName: concept.name,
+        style: brief.style || concept.name,
+        palette: concept.palette || [],
+        reason: "marked as best / favorite",
+      });
+    }
     toast(next ? "Добавлено в избранное" : "Убрано из избранного");
   }
 
@@ -879,7 +932,7 @@ export function CreateWizard({
         </div>
 
         <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
-          {activeMessages.length === 0 && mode === "select" && (
+          {activeMessages.length === 0 && mode === "select" && !showTemplates && (
             <div className="space-y-3">
               <div className="flex justify-start">
                 <div className="max-w-[90%] rounded-xl bg-muted px-3 py-2 text-sm text-foreground">
@@ -1126,10 +1179,12 @@ export function CreateWizard({
     );
   }
 
+  const showNicheAnalysis = process.env.NEXT_PUBLIC_SHOW_NICHE_ANALYSIS === "true";
+
   function ConceptsPanel() {
     return (
       <div className="space-y-6 overflow-y-auto p-1">
-        {analysis && (
+        {showNicheAnalysis && analysis && (
           <Card className="border-primary/20 bg-primary/5">
             <CardHeader>
               <CardTitle className="text-base">Анализ ниши</CardTitle>
@@ -1231,6 +1286,18 @@ export function CreateWizard({
                             setSelectedResultImage(img);
                             setCompareOpen(false);
                             toast("Вариант выбран — дальнейшие правки применяются к нему");
+                            const concept = (generation?.concept as any) || {};
+                            const brief = (generation?.brief as any) || {};
+                            void recordMemory("winner", {
+                              url: img.url,
+                              generationId: generation?.id,
+                              imageId: img.id,
+                              templateSlug: generation?.template?.slug,
+                              conceptName: concept.name,
+                              style: brief.style || concept.name,
+                              palette: concept.palette || [],
+                              reason: "chosen as winner in compare",
+                            });
                           }}
                         >
                           Выбрать победителя
@@ -1468,17 +1535,26 @@ function GenerationProgress() {
     return () => clearInterval(id);
   }, []);
 
-  const stageIndex = Math.min(Math.floor(elapsed / 12), GENERATION_STAGES.length - 1);
-  const progress = Math.min(5 + elapsed * 1.6, 95);
+  const lastStage = GENERATION_STAGES.length - 1;
+  const stageIndex = Math.min(Math.floor(elapsed / 12), lastStage);
+  const waiting = stageIndex === lastStage && elapsed >= (lastStage + 1) * 12;
+  const progress = waiting ? 95 : Math.min(5 + elapsed * 1.6, 95);
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
       <Sparkles className="size-12 animate-pulse text-primary" />
       <div>
         <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
-        <p className="text-muted-foreground">{GENERATION_STAGES[stageIndex]}…</p>
+        <p className="text-muted-foreground">
+          {waiting ? "Ожидаем ответа от нейросети…" : `${GENERATION_STAGES[stageIndex]}…`}
+        </p>
       </div>
       <Progress value={progress} className="w-full max-w-md" />
+      {waiting && (
+        <p className="max-w-md text-sm text-muted-foreground">
+          Модель обрабатывает макет. Если запрос сложный, это может занять больше минуты.
+        </p>
+      )}
       <ul className="space-y-1 text-left text-sm text-muted-foreground">
         {GENERATION_STAGES.map((stage, i) => (
           <li key={stage} className={i < stageIndex ? "text-foreground" : i === stageIndex ? "text-primary" : ""}>
