@@ -55,6 +55,8 @@ export async function POST(request: NextRequest) {
         templateId: template.id,
         title: data.headline || data.productName || template.name,
         brief: brief as any,
+        concept: concept as any,
+        data: data || {},
         conceptName: concept.name,
         status: "generating",
         prompt: "",
@@ -80,7 +82,7 @@ export async function POST(request: NextRequest) {
         },
         viewBox,
       },
-      Math.max(2, Math.min(8, Number(count) || 4))
+      Math.max(1, Math.min(2, Number(count) || 1))
     );
 
     if (designs.length === 0) {

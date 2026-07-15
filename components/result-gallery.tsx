@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardFooter } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Heart, Trash2, RefreshCw, Download } from "lucide-react";
+import { Heart, Trash2, RefreshCw, Download, Send, Wand2 } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -21,16 +22,34 @@ import { getViewBoxForTemplate } from "@/lib/design";
 import type { Generation } from "@/types";
 import type { GenerationImage } from "@prisma/client";
 
-export function ResultGallery({ generation, onRegenerate }: { generation: Generation; onRegenerate?: () => void }) {
+type ChatMsg = { role: "user" | "assistant"; content: string };
+
+export function ResultGallery({
+  generation,
+  onRegenerate,
+}: {
+  generation: Generation;
+  onRegenerate?: () => void;
+}) {
   const router = useRouter();
   const [isFavorite, setIsFavorite] = useState(generation.isFavorite);
-  const [selected, setSelected] = useState<GenerationImage | null>(generation.images[0] || null);
+  const [images, setImages] = useState<GenerationImage[]>(generation.images || []);
+  const [selected, setSelected] = useState<GenerationImage | null>(images[0] || null);
 
   const [format, setFormat] = useState<"svg" | "png" | "jpg">("png");
   const [width, setWidth] = useState<string>("");
   const [height, setHeight] = useState<string>("");
 
-  // Set default export size from the SVG viewBox when the selected image changes
+  const [editMessages, setEditMessages] = useState<ChatMsg[]>([]);
+  const [editInput, setEditInput] = useState("");
+  const [editLoading, setEditLoading] = useState(false);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setImages(generation.images || []);
+    setSelected(generation.images?.[0] || null);
+  }, [generation.images]);
+
   useEffect(() => {
     if (!selected) return;
     const baseViewBox = generation.template?.slug
@@ -49,10 +68,14 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
           setHeight(String(size.height));
         }
       })
-      .catch(() => {
-        // keep base size fallback
-      });
+      .catch(() => {});
   }, [selected, generation.template?.slug]);
+
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [editMessages, editLoading]);
 
   async function toggleFavorite() {
     const next = !isFavorite;
@@ -98,6 +121,41 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
     if (parts.length === 2) {
       setWidth(parts[0]);
       setHeight(parts[1]);
+    }
+  }
+
+  async function sendEdit() {
+    const text = editInput.trim();
+    if (!text || !selected) return;
+    setEditMessages((prev) => [...prev, { role: "user", content: text }]);
+    setEditInput("");
+    setEditLoading(true);
+
+    try {
+      const res = await fetch(`/api/projects/${generation.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: text, selectedImageUrl: selected.url, count: 2 }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+
+      if (json.clarificationQuestion) {
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.clarificationQuestion }]);
+      } else {
+        const newImages = (json.images || []) as GenerationImage[];
+        if (newImages.length > 0) {
+          setImages((prev) => [...prev, ...newImages]);
+          setSelected(newImages[0]);
+          toast("Варианты отредактированы");
+        }
+        setEditMessages((prev) => [...prev, { role: "assistant", content: "Готово. Новые варианты добавлены ниже." }]);
+      }
+    } catch (e: any) {
+      toast.error(e.message || "Не удалось отредактировать");
+      setEditMessages((prev) => [...prev, { role: "assistant", content: "Ошибка: " + (e.message || "повторите позже") }]);
+    } finally {
+      setEditLoading(false);
     }
   }
 
@@ -209,7 +267,7 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
 
         <div className="space-y-3">
           <h3 className="text-sm font-medium">Варианты</h3>
-          {generation.images.map((img) => (
+          {images.map((img) => (
             <button
               key={img.id}
               onClick={() => setSelected(img)}
@@ -226,6 +284,69 @@ export function ResultGallery({ generation, onRegenerate }: { generation: Genera
           ))}
         </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Правки через чат</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div
+            ref={chatScrollRef}
+            className="h-48 space-y-3 overflow-y-auto rounded-lg border bg-muted/30 p-3"
+          >
+            {editMessages.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                Напишите, что хотите изменить, например: «Передвинь логотип выше» или «Сделай фон темнее».
+              </p>
+            )}
+            {editMessages.map((m, i) => (
+              <div
+                key={i}
+                className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-xl px-3 py-2 text-sm ${
+                    m.role === "user"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-foreground"
+                  }`}
+                >
+                  {m.content}
+                </div>
+              </div>
+            ))}
+            {editLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Wand2 className="size-4 animate-pulse" />
+                ИИ редактирует…
+              </div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Textarea
+              value={editInput}
+              onChange={(e) => setEditInput(e.target.value)}
+              placeholder="Напишите правку…"
+              rows={2}
+              className="min-h-0 flex-1 resize-none"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendEdit();
+                }
+              }}
+            />
+            <Button
+              type="button"
+              disabled={editLoading || !editInput.trim()}
+              onClick={sendEdit}
+            >
+              <Send className="mr-1 size-4" />
+              Отправить
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

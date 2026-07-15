@@ -52,7 +52,8 @@ type InterviewTemplate = {
 };
 
 type ChatCompletionResponse = {
-  choices?: { message?: { content?: string } }[];
+  choices?: { message?: { content?: string }; finish_reason?: string }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; [key: string]: any };
 };
 
 function getApiConfig() {
@@ -77,6 +78,7 @@ async function callChatCompletionRaw(
       model: cfg.model,
       messages: [{ role: "system", content: systemPrompt }, ...messages],
       max_tokens: maxTokens,
+      reasoning_effort: "low",
     };
     if (jsonMode) {
       body.response_format = { type: "json_object" };
@@ -98,7 +100,9 @@ async function callChatCompletionRaw(
     }
 
     const data = (await res.json()) as ChatCompletionResponse;
-    return data.choices?.[0]?.message?.content?.trim() || null;
+    const choice = data.choices?.[0];
+    console.log("Chat completion usage:", JSON.stringify(data.usage), "finish_reason:", choice?.finish_reason);
+    return choice?.message?.content?.trim() || null;
   } catch (e) {
     console.error("callChatCompletionRaw error", e);
     return null;
@@ -131,27 +135,26 @@ export async function chatInterview(
   const conceptHint = template.promptHints?.concept || "";
   const designHint = template.promptHints?.design || "";
 
-  const systemPrompt = `Ты — старший арт-директор студии. Веди профессиональный диалог с клиентом для создания дизайна: "${template.name}" (${template.category}).
+  const systemPrompt = `Ты — профессиональный дизайнер-консультант. Общайся с клиентом естественно, по-человечески, на русском языке. Цель — создать дизайн "${template.name}" (${template.category}), который клиенту нужен.
 
 Как вести диалог:
-1. Задавай ровно один короткий, деловой вопрос за раз на русском языке.
-2. Прими любую информацию от клиента: текст, фото-референсы, пожелания, размеры, формат.
-3. Если клиент загружает фото, кратко скажи, что извлёк, и задай уточняющий вопрос.
-4. Поддерживай контекст — отвечай на сказанное, не повторяй вопросы, сохраняй уже полученные данные.
-5. Собирай ключевые параметры: что за бизнес, название, аудитория, стиль, цвета, размер/формат, текстовые блоки, фото-референсы.
-6. После 3-6 вопросов, когда данных достаточно, предложи 4-6 концепций с анализом и заверши диалог.
+1. Не задавай обязательных вопросов. Клиент сам пишет, что хочет. Твоя задача — слушать, уточнять только если непонятно, и собирать данные из его сообщений.
+2. Прими любую информацию: текст, размеры, цвета, стиль, фото-референсы, пожелания. Если клиент приложил фото, коротко прокомментируй, что увидел, и спроси, как именно использовать (стиль, палитра, композиция, не копировать).
+3. Поддерживай контекст — не повторяйся, не теряй уже сказанное, отвечай по существу.
+4. Рекомендуй: предлагай цвета, стиль, размещение, размер, телефон, QR, скидку — как опытный дизайнер.
+5. Когда клиент пишет «сгенерируй», «давай», «готово» или данных достаточно — сразу предложи 4-6 концепций с анализом ниши и заверши диалог.
 
 Справка по типу дизайна:
 - Описание: ${template.description || "—"}
 - Подсказка для концепций: ${conceptHint || "—"}
 - Подсказка для макета: ${designHint || "—"}
 
-Поля макета (заполнять неявно через диалог):
+Поля макета (заполнять неявно из сообщений клиента):
 ${fields || "- нет специфических полей"}
 
-В каждом ответе возвращай ТОЛЬКО JSON, строго такого вида, без markdown и без текста вне JSON:
+В каждом ответе возвращай ТОЛЬКО JSON, без markdown и текста вне JSON:
 {
-  "message": "то, что ты говоришь клиенту (на русском, один вопрос или представление концепций)",
+  "message": "ответ клиенту на русском: подтверждение, рекомендация, короткий вопрос для уточнения или представление концепций",
   "extractedData": {
     "businessDesc": "чем занимается компания",
     "companyName": "название",
@@ -168,7 +171,7 @@ ${fields || "- нет специфических полей"}
   "concepts": null
 }
 
-Если клиент просит конкретный размер (например, 1200x630, 1080x1920, A4), сохрани его в extractedData.size и extractedData.data.size. Если размер не нужен, оставь пустым.
+Если клиент просит размер (например, 1200x630, 1080x1920, A4), сохрани его в extractedData.size и extractedData.data.size.
 
 Когда готов предложить концепции, установи done: true:
 {
@@ -181,7 +184,7 @@ ${fields || "- нет специфических полей"}
   ]
 }
 
-ВАЖНО: JSON должен быть валидным. Если клиент уже ответил на вопрос, обязательно сохрани этот ответ в extractedData и задай следующий, логичный вопрос. Не повторяй уже заданный вопрос. Не теряй уже собранные данные.
+ВАЖНО: JSON должен быть валидным. Сохраняй уже собранные данные из currentData. Если клиент дал информацию — обязательно перенеси её в extractedData. Не задавай похожие вопросы подряд.
 
 currentData на данный момент: ${JSON.stringify(currentData)}`;
 
@@ -564,6 +567,7 @@ export type DesignGenerationInput = {
   data: Record<string, string>;
   template: { slug: string; name: string; category: string; promptHints?: any };
   viewBox: string;
+  editNote?: string;
 };
 
 export async function generateDesigns(
@@ -589,19 +593,87 @@ export async function generateDesigns(
   return Promise.all(promises);
 }
 
+type EditParseResult = {
+  updatedData: Record<string, string>;
+  editSummary: string;
+  responseToUser: string;
+  clarificationQuestion?: string | null;
+};
+
+async function parseEditInstruction(
+  input: DesignGenerationInput,
+  instruction: string
+): Promise<EditParseResult> {
+  const system = `You are an AI design editor. The user wants to change an existing design.
+Analyze the request and output valid JSON with these fields:
+- updatedData: object with the same keys as the current data but updated values. Set a value to "" to remove it. Add new keys only if they naturally fit the request (phone, address, qrUrl, website, discount, etc.).
+- editSummary: a concise English instruction for the SVG generator describing the change to apply.
+- responseToUser: a short, friendly Russian acknowledgement of the change or the clarification question.
+- clarificationQuestion: null if the request is clear, otherwise one short multiple-choice or open question in Russian to clarify the intent.
+
+Current design type: "${input.template.name}" (${input.template.category}).`;
+
+  const user = `Current data:\n${JSON.stringify(input.data, null, 2)}\n\nUser request: "${instruction}"\n\nOutput JSON only.`;
+
+  const text = await callChatCompletion(system, user, 4096, true);
+  const fallback: EditParseResult = {
+    updatedData: { ...input.data, editInstruction: instruction },
+    editSummary: instruction,
+    responseToUser: "Понял, применяю правку.",
+  };
+
+  if (!text) return fallback;
+
+  try {
+    const json = extractJson(text);
+    if (!json) return fallback;
+    const parsed = JSON.parse(json);
+    const updatedData: Record<string, string> = {};
+    for (const [k, v] of Object.entries({ ...input.data, ...(parsed.updatedData || {}) })) {
+      if (v === null || v === undefined) continue;
+      const str = String(v).trim();
+      if (str === "" && k !== "editInstruction") continue;
+      updatedData[k] = str;
+    }
+    return {
+      updatedData,
+      editSummary: String(parsed.editSummary || instruction),
+      responseToUser: String(parsed.responseToUser || "Готово."),
+      clarificationQuestion: parsed.clarificationQuestion || undefined,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export async function editDesigns(
+  input: DesignGenerationInput,
+  instruction: string,
+  count = 2,
+  signal?: AbortSignal
+): Promise<{ svg: string; label: string; clarificationQuestion?: string }[]> {
+  if (!getApiConfig()) return [];
+
+  const parsed = await parseEditInstruction(input, instruction);
+  if (parsed.clarificationQuestion) {
+    return [{ svg: "", label: "", clarificationQuestion: parsed.clarificationQuestion }];
+  }
+
+  const updatedInput: DesignGenerationInput = {
+    ...input,
+    data: parsed.updatedData,
+    editNote: parsed.editSummary,
+  };
+
+  return generateDesigns(updatedInput, count, signal);
+}
+
 async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
   if (!getApiConfig()) return null;
 
-  const system = `You are an expert SVG graphic designer. Output a single, valid SVG 1.1 design as raw markup.
+  const system = `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster. Balanced, readable, high contrast, professional.`;
 
-Rules:
-- Start the response with <svg and end with </svg>. No markdown, no explanation, no comments.
-- Use only sans-serif, serif or monospace fonts.
-- All text must fit inside the viewBox.
-- Use simple flat vector shapes. No raster images.
-- Keep the design balanced and professional.`;
-
-  const userPrompt = buildDesignPrompt(input, variantIndex);
+  const userPrompt = buildDesignPrompt(input);
   // Claude reasoning models need a large token budget: internal reasoning consumes
   // most of the budget, so we request plenty of room for the actual SVG output.
   const text = await callChatCompletion(system, userPrompt, 16000);
@@ -619,7 +691,31 @@ Rules:
   return svg;
 }
 
-function buildDesignPrompt(input: DesignGenerationInput, variantIndex: number): string {
+const LABELS: Record<string, string> = {
+  headline: "Headline",
+  subheadline: "Subheadline",
+  productName: "Product",
+  phone: "Phone",
+  address: "Address",
+  website: "Website",
+  email: "Email",
+  telegram: "Telegram",
+  discount: "Discount",
+  cta: "CTA",
+  qrUrl: "QR",
+  logoUrl: "Logo",
+};
+
+function fieldLabel(key: string): string {
+  return LABELS[key] || key;
+}
+
+function trunc(s: string | undefined, n: number): string {
+  if (!s) return "";
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function buildDesignPrompt(input: DesignGenerationInput): string {
   const { brief, concept, data, template, viewBox } = input;
   const [w, h] = viewBox.split(" ").slice(2).map(Number);
 
@@ -629,81 +725,27 @@ function buildDesignPrompt(input: DesignGenerationInput, variantIndex: number): 
     template.promptHints?.transparent === true;
 
   const textBlocks = Object.entries(data)
-    .filter(([, v]) => typeof v === "string" && v.trim())
-    .map(([k, v]) => `${k}: ${v}`)
+    .filter(([k, v]) => typeof v === "string" && v.trim() && k !== "editInstruction" && k !== "size")
+    .map(([k, v]) => `${fieldLabel(k)}: ${v}`)
     .join("\n");
 
-  const composition = getDesignStyleHints(template, variantIndex);
-  const designHint = template.promptHints?.design ? ` ${template.promptHints.design}` : "";
-  const transparentNote = isTransparent
-    ? " IMPORTANT: The background must be transparent. Do NOT draw any background rectangle, gradient or fill behind the main design."
-    : "";
+  const designHint = template.promptHints?.design ? ` ${String(template.promptHints.design).slice(0, 120)}` : "";
+  const transparentNote = isTransparent ? " Transparent bg, no bg rect, no shadows/3D." : "";
 
   const role = template.slug.includes("logo")
-    ? "Create a professional logo mark."
+    ? "logo mark"
     : template.slug.includes("icons")
-    ? "Create a clean UI icon set."
+    ? "UI icon set"
     : template.slug.includes("business-card")
-    ? "Create a professional business card layout."
+    ? "business card"
     : template.slug.includes("certificate")
-    ? "Create an elegant certificate."
-    : "Create a professional marketing graphic.";
+    ? "certificate"
+    : "marketing graphic";
 
-  return `${role}
-Business: ${brief.companyName || "—"} — ${brief.businessDesc || "—"}. Audience: ${brief.targetAudience || "—"}.
-Concept: ${concept.name} — ${concept.description}. Style: ${brief.style || concept.name}. Colors: ${concept.palette.join(", ")}.
-Specific instructions for "${template.name}" (${template.category}):${designHint}${transparentNote}
-Canvas: viewBox="${viewBox}" (${w}×${h}).
-Text / data to include (keep it short and in the brand language):
-${textBlocks || "(create concise copy from the business above)"}
-Composition for variant #${variantIndex + 1}: ${composition}.
-
-Output raw SVG only.`;
+  return `Create a ${role} for "${brief.companyName || template.name}".
+Business: ${trunc(brief.businessDesc, 80) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 50)}. Palette: ${concept.palette.join(", ")}.
+Template: ${template.name}.${designHint}${transparentNote}
+viewBox="${viewBox}" (${w}×${h}).${textBlocks ? "\n" + textBlocks : ""}
+${input.editNote ? `Edit: ${input.editNote}\n` : ""}Output raw SVG only.`;
 }
 
-function getDesignStyleHints(template: DesignGenerationInput["template"], variantIndex: number): string {
-  const slug = template.slug;
-  const logoHints = [
-    "symbol mark centered above the wordmark, clean spacing",
-    "lettermark in a simple geometric frame with brand name beside it",
-    "minimal icon on the left, brand name on the right, baseline-aligned",
-    "badge-style emblem with the brand name as a lockup",
-  ];
-  const bannerHints = [
-    "text aligned left with a bold accent shape on the right",
-    "centered headline with soft gradient background and CTA button below",
-    "split layout: text left, simple icon/illustration right",
-    "full-bleed background shape with high-contrast headline overlay",
-  ];
-  const cardHints = [
-    "classic layout with logo top-left, name large, contacts bottom-right",
-    "modern left/right split: name and role on the left, contact icons on the right",
-    "centered name with subtle accent line and compact contact block below",
-    "minimal top-aligned logo, large name, airy contact grid",
-  ];
-  const certificateHints = [
-    "elegant border frame with centered title, generous whitespace",
-    "ornate corner decorations with ribbon accent and centered text",
-    "modern minimal certificate with top logo and bottom signature lines",
-    "classic diploma layout with script-style title and seal area",
-  ];
-  const iconHints = [
-    "2×3 grid of monoline icons with consistent 24px-style stroke",
-    "3×2 grid of filled/simple icons with rounded corners",
-    "2×2 large icons with labels underneath",
-    "3×3 compact icon set in a clean square arrangement",
-  ];
-  const genericHints = [
-    "clean centered layout with bold headline and supporting text",
-    "asymmetric composition with a large accent shape",
-    "bold typographic hierarchy with a strong CTA",
-    "soft geometric background with text aligned to a grid",
-  ];
-
-  if (slug.includes("logo")) return logoHints[variantIndex % logoHints.length];
-  if (slug.includes("business-card")) return cardHints[variantIndex % cardHints.length];
-  if (slug.includes("certificate")) return certificateHints[variantIndex % certificateHints.length];
-  if (slug.includes("icons")) return iconHints[variantIndex % iconHints.length];
-  if (slug.includes("banner") || slug.includes("hero") || slug.includes("billboard") || slug.includes("promo")) return bannerHints[variantIndex % bannerHints.length];
-  return genericHints[variantIndex % genericHints.length];
-}

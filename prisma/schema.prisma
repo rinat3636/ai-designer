@@ -75,6 +75,9 @@ model Generation {
   template    Template @relation(fields: [templateId], references: [id])
   title       String?
   brief       Json?
+  concept     Json?
+  data        Json?
+  chatHistory Json?
   conceptName String?
   status      String   @default("pending")
   prompt      String?

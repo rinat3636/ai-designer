@@ -206,7 +206,7 @@ export function CreateWizard({
           brief,
           concept: selectedConcept,
           data,
-          count: 4,
+          count: 1,
         }),
       });
       const json = await res.json();
