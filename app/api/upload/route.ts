@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import { mkdir, writeFile } from "fs/promises";
 import path from "path";
+import sharp from "sharp";
 
 export async function POST(request: Request) {
   try {
@@ -25,7 +26,17 @@ export async function POST(request: Request) {
     const filePath = path.join(dir, fileName);
     await writeFile(filePath, buffer);
 
-    return NextResponse.json({ url: `/uploads/${fileName}` });
+    let width = 0;
+    let height = 0;
+    try {
+      const metadata = await sharp(filePath).metadata();
+      width = metadata.width || 0;
+      height = metadata.height || 0;
+    } catch {
+      // ignore
+    }
+
+    return NextResponse.json({ url: `/uploads/${fileName}`, width, height });
   } catch (e: any) {
     console.error("Upload error", e);
     return NextResponse.json({ error: e.message || "Upload failed" }, { status: 500 });

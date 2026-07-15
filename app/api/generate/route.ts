@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { generateDesigns, type Brief, type Concept } from "@/lib/llm";
+import { generateDesigns, analyzeImage, type Brief, type Concept } from "@/lib/llm";
 import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
 import { saveSvg, readLocalSvg } from "@/lib/storage";
 
@@ -42,6 +42,28 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // When editing from a raster image, analyze it to extract visible text and
+    // elements so the generator can reproduce the design faithfully.
+    let enrichedBrief = brief as Brief;
+    let enrichedData = (data || {}) as Record<string, string>;
+    if (editNote && !sourceSvg && nonSvgRefs.length > 0) {
+      try {
+        const analysis = await analyzeImage(nonSvgRefs[0]);
+        const text = analysis.text || analysis.description || "";
+        if (text) {
+          enrichedData = { ...enrichedData, extractedText: text };
+          if (!enrichedBrief.businessDesc?.trim()) {
+            enrichedBrief = { ...enrichedBrief, businessDesc: analysis.description || "Загруженный макет" };
+          }
+          if (analysis.colors?.length && !enrichedBrief.colors?.length) {
+            enrichedBrief = { ...enrichedBrief, colors: analysis.colors };
+          }
+        }
+      } catch (e) {
+        console.warn("Image analysis failed", e);
+      }
+    }
+
     // Subscription check
     let subscription = await prisma.subscription.findUnique({
       where: { userId: user.id },
@@ -63,6 +85,25 @@ export async function POST(request: NextRequest) {
         { error: "Monthly generation limit reached" },
         { status: 403 }
       );
+    }
+
+    // Support the virtual "upload your own" template by creating a generic record on demand.
+    if (templateId === "upload") {
+      await prisma.template.upsert({
+        where: { id: "upload" },
+        update: {},
+        create: {
+          id: "upload",
+          slug: "custom-upload",
+          category: "Редактор",
+          categoryKey: "editor",
+          name: "Редактировать свой макет",
+          description: "Загруженный пользователем макет",
+          isActive: true,
+          displayOrder: -1,
+          promptHints: {},
+        },
+      });
     }
 
     const template = await prisma.template.findUnique({ where: { id: templateId } });
@@ -92,9 +133,9 @@ export async function POST(request: NextRequest) {
 
     const designs = await generateDesigns(
       {
-        brief: brief as Brief,
+        brief: enrichedBrief,
         concept: concept as Concept,
-        data: data || {},
+        data: enrichedData,
         template: {
           slug: template.slug,
           name: template.name,

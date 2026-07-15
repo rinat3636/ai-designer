@@ -25,6 +25,7 @@ import {
   Heart,
   Trash2,
   MessageSquare,
+  Upload,
 } from "lucide-react";
 import type { Template, Brand, Generation, Concept, Brief } from "@/types";
 import type { GenerationImage } from "@prisma/client";
@@ -44,6 +45,23 @@ function extractSize(text: string): string {
   return match ? `${match[1]}x${match[2]}` : "";
 }
 
+const UPLOAD_TEMPLATE_ID = "upload";
+const UPLOAD_TEMPLATE: Template = {
+  id: UPLOAD_TEMPLATE_ID,
+  slug: "custom-upload",
+  category: "Редактор",
+  categoryKey: "editor",
+  name: "Редактировать свой макет",
+  description: "Загрузите готовый логотип, сертификат или другой макет, и ИИ внесёт правки, сохранив оригинал.",
+  icon: "Upload",
+  fields: [],
+  promptHints: {},
+  isActive: true,
+  displayOrder: -1,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+} as unknown as Template;
+
 type ChatContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
@@ -53,7 +71,7 @@ type ChatMessage = {
   content: string | ChatContentPart[];
 };
 
-type WizardMode = "select" | "interview" | "concepts" | "generating" | "result";
+type WizardMode = "select" | "upload-edit" | "interview" | "concepts" | "generating" | "result";
 
 export function CreateWizard({
   templates,
@@ -87,11 +105,12 @@ export function CreateWizard({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
-  const template = useMemo(
-    () => templates.find((t) => t.id === selectedTemplateId) || null,
-    [selectedTemplateId, templates]
-  );
+  const template = useMemo(() => {
+    if (selectedTemplateId === UPLOAD_TEMPLATE_ID) return UPLOAD_TEMPLATE;
+    return templates.find((t) => t.id === selectedTemplateId) || null;
+  }, [selectedTemplateId, templates]);
 
   const categories = useMemo(() => {
     const map = new Map<string, Template[]>();
@@ -111,7 +130,11 @@ export function CreateWizard({
       setSelectedImages([]);
       setEditMessages([]);
       setEditInput("");
-      setMode("interview");
+      if (selectedTemplateId === UPLOAD_TEMPLATE_ID) {
+        setMode("upload-edit");
+      } else {
+        setMode("interview");
+      }
     }
   }, [selectedTemplateId, mode]);
 
@@ -183,7 +206,7 @@ export function CreateWizard({
     };
   }
 
-  async function uploadFile(file: File): Promise<string | null> {
+  async function uploadFile(file: File): Promise<{ url: string; width: number; height: number } | null> {
     setUploading(true);
     setError("");
     const formData = new FormData();
@@ -192,7 +215,7 @@ export function CreateWizard({
       const res = await fetch("/api/upload", { method: "POST", body: formData });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error);
-      return json.url;
+      return { url: json.url, width: json.width || 0, height: json.height || 0 };
     } catch (e: any) {
       setError(e.message || "Ошибка загрузки файла");
       return null;
@@ -204,8 +227,12 @@ export function CreateWizard({
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const url = await uploadFile(file);
-    if (url) {
+    const result = await uploadFile(file);
+    if (result) {
+      const { url, width, height } = result;
+      if (width > 0 && height > 0) {
+        setCurrentData((prev) => ({ ...prev, size: `${width}x${height}` }));
+      }
       if (mode === "result") {
         setEditImages((prev) => [...prev, url]);
       } else {
@@ -218,6 +245,17 @@ export function CreateWizard({
   async function sendMessage() {
     const text = inputText.trim();
     if ((!text && selectedImages.length === 0) || !template) return;
+
+    // In the upload-edit mode, always edit the uploaded image directly.
+    if (mode === "upload-edit" && selectedImages.length > 0) {
+      const instruction = text || "Сохрани макет и примени небольшие улучшения";
+      const editContent: ChatContentPart[] = [
+        { type: "text", text: instruction },
+        ...selectedImages.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+      ];
+      setMessages((prev) => [...prev, { role: "user", content: editContent }]);
+      return generateFromImage(instruction, selectedImages);
+    }
 
     // If the user uploaded an image and the message looks like an edit request,
     // bypass the interview and generate a new SVG based on the uploaded design.
@@ -379,7 +417,7 @@ export function CreateWizard({
       toast.success("Макет на основе изображения готов!");
     } catch (e: any) {
       setError(e.message || "Ошибка генерации по изображению");
-      setMode("interview");
+      setMode(mode === "upload-edit" ? "upload-edit" : "interview");
     } finally {
       setLoading(false);
     }
@@ -475,6 +513,11 @@ export function CreateWizard({
     sendEditInstruction("Сделай похожий вариант с небольшими отличиями", true);
   }
 
+  function handleEditFocus() {
+    chatInputRef.current?.focus();
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
+  }
+
   async function toggleFavorite() {
     if (!generation) return;
     const next = !isFavorite;
@@ -514,7 +557,7 @@ export function CreateWizard({
   }
 
   function handleBack() {
-    if (mode === "interview") {
+    if (mode === "interview" || mode === "upload-edit") {
       setMode("select");
       setMessages([]);
       setCurrentData({});
@@ -561,6 +604,8 @@ export function CreateWizard({
   const inputPlaceholder =
     mode === "select"
       ? "Сначала выберите тип дизайна…"
+      : mode === "upload-edit"
+      ? "Загрузите макет и напишите правку, например: «Сделай фон красным»…"
       : isResult
       ? "Напишите правку, например: «Сделай фон темнее»…"
       : "Ваш ответ…";
@@ -584,8 +629,12 @@ export function CreateWizard({
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
-    const url = await uploadFile(file);
-    if (url) {
+    const result = await uploadFile(file);
+    if (result) {
+      const { url, width, height } = result;
+      if (width > 0 && height > 0) {
+        setCurrentData((prev) => ({ ...prev, size: `${width}x${height}` }));
+      }
       if (mode === "result") {
         setEditImages((prev) => [...prev, url]);
       } else {
@@ -612,13 +661,18 @@ export function CreateWizard({
         <div className="flex items-center justify-between border-b p-3">
           <div className="flex items-center gap-2">
             <MessageSquare className="size-4 text-primary" />
-            <h3 className="font-medium">{isResult ? "Правки" : "Чат с ИИ-дизайнером"}</h3>
+            <h3 className="font-medium">{isResult ? "Правки" : mode === "upload-edit" ? "Редактор макета" : "Чат с ИИ-дизайнером"}</h3>
           </div>
           {template && !isResult && <span className="text-xs text-muted-foreground">{template.name}</span>}
         </div>
 
         <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
-          {activeMessages.length === 0 && !isResult && (
+          {activeMessages.length === 0 && mode === "upload-edit" && (
+            <div className="text-center text-sm text-muted-foreground">
+              Загрузите макет (логотип, сертификат и т.д.) и напишите, что изменить, например: «Сделай фон красным».
+            </div>
+          )}
+          {activeMessages.length === 0 && mode === "interview" && (
             <div className="text-center text-sm text-muted-foreground">
               Напишите первое сообщение, например: «Нужен логотип для кофейни в стиле минимализма».
             </div>
@@ -644,7 +698,7 @@ export function CreateWizard({
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Wand2 className="size-4 animate-pulse" />
-              {isResult ? "ИИ редактирует…" : "ИИ печатает…"}
+              {isResult ? "ИИ редактирует…" : mode === "upload-edit" ? "ИИ редактирует макет…" : "ИИ печатает…"}
             </div>
           )}
         </div>
@@ -686,6 +740,7 @@ export function CreateWizard({
               <Paperclip className="size-5 md:size-4" />
             </Button>
             <Textarea
+              ref={chatInputRef}
               value={activeInput}
               onChange={(e) => setActiveInput(e.target.value)}
               placeholder={inputPlaceholder}
@@ -714,10 +769,29 @@ export function CreateWizard({
     return (
       <div className="space-y-6 overflow-y-auto p-1">
         <div className="text-center">
-          <h1 className="text-2xl font-semibold">Выберите тип дизайна</h1>
-          <p className="text-muted-foreground">После выбора начнётся диалог с ИИ-дизайнером</p>
+          <h1 className="text-2xl font-semibold">Что хотите сделать?</h1>
+          <p className="text-muted-foreground">Редактируйте свой макет или создайте новый дизайн с помощью ИИ</p>
         </div>
         <div className="space-y-8">
+          <div>
+            <h2 className="mb-3 text-lg font-medium">Редактор макета</h2>
+            <Card
+              onClick={() => setSelectedTemplateId(UPLOAD_TEMPLATE_ID)}
+              className={`cursor-pointer transition hover:border-primary ${
+                selectedTemplateId === UPLOAD_TEMPLATE_ID ? "ring-2 ring-primary" : ""
+              }`}
+            >
+              <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Upload className="size-6" />
+                </div>
+                <div>
+                  <CardTitle>Редактировать свой макет</CardTitle>
+                  <CardDescription>Загрузите логотип, сертификат или другой файл, и ИИ внесёт правки, сохранив оригинал.</CardDescription>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
           {Array.from(categories.entries()).map(([catKey, items]) => (
             <div key={catKey}>
               <h2 className="mb-3 text-lg font-medium">{items[0]?.category}</h2>
@@ -756,6 +830,18 @@ export function CreateWizard({
         <h2 className="text-2xl font-semibold">Диалог с ИИ-дизайнером</h2>
         <p className="max-w-md text-muted-foreground">
           Отвечайте текстом или перетащите фото-референс в чат. ИИ задаст нужные вопросы и предложит концепции.
+        </p>
+      </div>
+    );
+  }
+
+  function UploadEditPlaceholder() {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+        <Upload className="size-12 text-muted-foreground" />
+        <h2 className="text-2xl font-semibold">Редактор макета</h2>
+        <p className="max-w-md text-muted-foreground">
+          Загрузите свой логотип, сертификат или другой макет в чат слева и напишите, что нужно изменить. ИИ сохранит оригинал и внесёт правку.
         </p>
       </div>
     );
@@ -856,6 +942,9 @@ export function CreateWizard({
                 <CardTitle className="text-base">Быстрые действия</CardTitle>
               </CardHeader>
               <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
+                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleEditFocus} disabled={!selectedResultImage}>
+                  <MessageSquare className="mr-2 size-5 sm:size-4" /> Редактировать
+                </Button>
                 <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
                   <Download className="mr-2 size-5 sm:size-4" /> Скачать
                 </Button>
@@ -969,6 +1058,8 @@ export function CreateWizard({
         return TemplateSelection();
       case "interview":
         return InterviewPlaceholder();
+      case "upload-edit":
+        return UploadEditPlaceholder();
       case "concepts":
         if (loading && concepts.length === 0) {
           return (

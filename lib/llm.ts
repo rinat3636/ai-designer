@@ -709,6 +709,46 @@ export async function editDesigns(
   return generateDesigns(updatedInput, count, signal);
 }
 
+export async function analyzeImage(imageUrl: string): Promise<{ text: string; description: string; colors: string[]; elements: string[] }> {
+  const b64 = await imageUrlToBase64(imageUrl);
+  if (!b64) {
+    return { text: "", description: "", colors: [], elements: [] };
+  }
+
+  const system = `You are analyzing a design image. Extract the following and return valid JSON only:
+{
+  "text": "all visible text exactly as it appears, separated by \\n",
+  "description": "short description of layout, style and main visual elements",
+  "colors": ["#hex", "#hex"],
+  "elements": ["element 1", "element 2"]
+}
+Be precise with text. Do not invent text that is not visible.`;
+
+  const content: ChatContentPart[] = [
+    { type: "text", text: "Extract all visible text, dominant colors, and describe the design. Return JSON only." },
+    { type: "image_url", image_url: { url: b64 } },
+  ];
+
+  const text = await callChatCompletion(system, content, 2048, true, undefined, 0);
+  const empty = { text: "", description: "", colors: [], elements: [] };
+  if (!text) return empty;
+
+  const jsonStr = extractJson(text);
+  if (!jsonStr) return empty;
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return {
+      text: String(parsed.text || ""),
+      description: String(parsed.description || ""),
+      colors: Array.isArray(parsed.colors) ? parsed.colors.map(String) : [],
+      elements: Array.isArray(parsed.elements) ? parsed.elements.map(String) : [],
+    };
+  } catch {
+    return empty;
+  }
+}
+
 async function imageUrlToBase64(url: string): Promise<string | null> {
   try {
     if (url.startsWith("data:")) return url;
