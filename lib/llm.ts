@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { prisma } from "@/lib/prisma";
 import { placeholderSVG } from "./design";
 import { promptToPngDataUrl } from "./prompt-image";
@@ -70,7 +72,8 @@ async function callChatCompletionRaw(
   messages: ChatMessage[],
   maxTokens = 4096,
   jsonMode = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  temperature?: number
 ): Promise<string | null> {
   const cfg = getApiConfig();
   if (!cfg) return null;
@@ -94,6 +97,9 @@ async function callChatCompletionRaw(
       max_tokens: maxTokens,
       reasoning_effort: "low",
     };
+    if (typeof temperature === "number") {
+      body.temperature = temperature;
+    }
     if (jsonMode) {
       body.response_format = { type: "json_object" };
     }
@@ -131,9 +137,10 @@ async function callChatCompletion(
   userPrompt: string | ChatContentPart[],
   maxTokens = 4096,
   jsonMode = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  temperature?: number
 ): Promise<string | null> {
-  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal);
+  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal, temperature);
 }
 
 export async function chatInterview(
@@ -692,38 +699,63 @@ export async function editDesigns(
   return generateDesigns(updatedInput, count, signal);
 }
 
+async function imageUrlToBase64(url: string): Promise<string | null> {
+  try {
+    if (url.startsWith("data:")) return url;
+    let buffer: Buffer;
+    if (url.startsWith("http")) {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      buffer = Buffer.from(await res.arrayBuffer());
+    } else if (url.startsWith("/")) {
+      const filePath = path.join(process.cwd(), "public", url);
+      buffer = fs.readFileSync(filePath);
+    } else {
+      return null;
+    }
+    const ext = path.extname(url.split("?")[0]).toLowerCase();
+    let mime = "image/png";
+    if (ext === ".jpg" || ext === ".jpeg") mime = "image/jpeg";
+    if (ext === ".webp") mime = "image/webp";
+    if (ext === ".gif") mime = "image/gif";
+    return `data:${mime};base64,${buffer.toString("base64")}`;
+  } catch (e) {
+    console.warn("Failed to convert image to base64", url, e);
+    return null;
+  }
+}
+
 async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
   if (!getApiConfig()) return null;
 
-  const isEdit = Boolean(input.sourceSvg && input.editNote);
+  const isEdit = Boolean(input.editNote && (input.sourceSvg || (input.referenceImages || []).length > 0));
 
   const system = isEdit
-    ? `You are an expert SVG editor. The user wants to modify an existing SVG. Apply ONLY the requested change. Preserve the same viewBox, color palette, fonts, layout, and all elements that are not mentioned in the instruction. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Balanced, readable, high contrast, professional.`
+    ? `You are a precise SVG editor. The user provides a design and a single change request. Output ONLY the full updated SVG. Do not redesign, do not add/remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so. Keep the same viewBox. Output raw SVG 1.1 only, no markdown, no comments.`
     : `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster. Balanced, readable, high contrast, professional.`;
 
-  const basePrompt = buildDesignPrompt(input);
-  const userPrompt = isEdit
-    ? `${basePrompt}\n\nCURRENT SVG TO EDIT:\n${input.sourceSvg}\n\nApply this change and return the full updated SVG only: ${input.editNote}`
-    : basePrompt;
+  const userPrompt = isEdit ? buildEditPrompt(input) : buildDesignPrompt(input);
 
   async function attempt(): Promise<string | null> {
     let text: string | null = null;
-    const refs = input.referenceImages || [];
+    const refs = (await Promise.all((input.referenceImages || []).map(imageUrlToBase64))).filter(
+      (u): u is string => Boolean(u)
+    );
     if (process.env.USE_IMAGE_PROMPT === "true" && !input.sourceSvg) {
       const imageUrl = await promptToPngDataUrl(userPrompt, input.viewBox);
       const content: ChatContentPart[] = [{ type: "image_url", image_url: { url: imageUrl } }];
       if (refs.length) {
         content.push(...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })));
       }
-      text = await callChatCompletion(system, content, 12000);
+      text = await callChatCompletion(system, content, 12000, false, undefined, isEdit ? 0 : 0.7);
     } else if (refs.length) {
       const content: ChatContentPart[] = [
         { type: "text", text: userPrompt },
         ...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })),
       ];
-      text = await callChatCompletion(system, content, 12000);
+      text = await callChatCompletion(system, content, 12000, false, undefined, isEdit ? 0 : 0.7);
     } else {
-      text = await callChatCompletion(system, userPrompt, 12000);
+      text = await callChatCompletion(system, userPrompt, 12000, false, undefined, isEdit ? 0 : 0.7);
     }
     if (!text) return null;
 
@@ -801,6 +833,25 @@ function buildDesignPrompt(input: DesignGenerationInput): string {
 Business: ${trunc(brief.businessDesc, 80) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 50)}. Palette: ${concept.palette.join(", ")}.
 Template: ${template.name}.${designHint}${transparentNote}
 viewBox="${viewBox}" (${w}×${h}).${textBlocks ? "\n" + textBlocks : ""}
-${input.editNote ? `Edit: ${input.editNote}\n` : ""}Output raw SVG only.`;
+Output raw SVG only.`;
+}
+
+function buildEditPrompt(input: DesignGenerationInput): string {
+  const { data, viewBox } = input;
+  const hasImage = (input.referenceImages || []).length > 0;
+
+  const textBlocks = Object.entries(data)
+    .filter(([k, v]) => typeof v === "string" && v.trim() && k !== "editInstruction" && k !== "size")
+    .map(([k, v]) => `${fieldLabel(k)}: ${v}`)
+    .join("\n");
+
+  let body = `Apply ONLY the requested change and return the full updated SVG. Keep the same viewBox "${viewBox}". Do not redesign, do not add or remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so.`;
+
+  if (textBlocks) body += `\nText/content to keep exactly as-is:\n${textBlocks}`;
+  if (input.sourceSvg) body += `\n\nCURRENT SVG TO EDIT:\n${input.sourceSvg}`;
+  if (hasImage && !input.sourceSvg) body += `\n\nThe current design is shown in the attached image(s). Recreate it as an SVG faithfully: copy the exact visible text, layout, colors, and composition, then apply ONLY the requested change. Do not use generic placeholder text such as "Design Title" or "Subtitle" — use the real text from the image.`;
+
+  body += `\n\nChange to apply: ${input.editNote}\n\nReturn the updated SVG only.`;
+  return body;
 }
 

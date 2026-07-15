@@ -3,9 +3,7 @@ import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { editDesigns, type Brief, type Concept, type DesignGenerationInput } from "@/lib/llm";
 import { getViewBoxForTemplate } from "@/lib/design";
-import { saveSvg, removeGenerationFiles } from "@/lib/storage";
-import fs from "fs";
-import path from "path";
+import { saveSvg, removeGenerationFiles, readLocalSvg } from "@/lib/storage";
 
 export async function GET(
   _request: NextRequest,
@@ -81,18 +79,6 @@ export async function POST(
 
   const refs = Array.isArray(referenceImageUrls) ? (referenceImageUrls as string[]) : [];
   const allSourceUrls = sourceUrl ? [sourceUrl, ...refs] : refs;
-
-  function readLocalSvg(url: string): string | null {
-    if (!url || (!url.startsWith("/generated/") && !url.startsWith("/uploads/"))) return null;
-    try {
-      const filePath = path.join(process.cwd(), "public", url);
-      const content = fs.readFileSync(filePath, "utf-8");
-      return content.includes("<svg") ? content : null;
-    } catch (e) {
-      console.error("Failed to read local SVG", url, e);
-      return null;
-    }
-  }
 
   let sourceSvg = "";
   for (const url of allSourceUrls) {

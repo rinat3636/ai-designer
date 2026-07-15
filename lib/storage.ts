@@ -15,3 +15,15 @@ export function removeGenerationFiles(generationId: string) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
+
+export function readLocalSvg(url: string): string | null {
+  if (!url || (!url.startsWith("/generated/") && !url.startsWith("/uploads/"))) return null;
+  try {
+    const filePath = path.join(process.cwd(), "public", url);
+    const content = fs.readFileSync(filePath, "utf-8");
+    return content.includes("<svg") ? content : null;
+  } catch (e) {
+    console.error("Failed to read local SVG", url, e);
+    return null;
+  }
+}

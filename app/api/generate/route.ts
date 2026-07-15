@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { generateDesigns, type Brief, type Concept } from "@/lib/llm";
 import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
-import { saveSvg } from "@/lib/storage";
+import { saveSvg, readLocalSvg } from "@/lib/storage";
 
 export const maxDuration = 300;
 
@@ -15,10 +15,31 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { templateId, brief, concept, data, count = 4 } = body;
+    const {
+      templateId,
+      brief,
+      concept,
+      data,
+      referenceImageUrls = [],
+      editNote,
+      count = 4,
+    } = body;
 
     if (!templateId || !brief || !concept) {
       return NextResponse.json({ error: "Missing fields" }, { status: 400 });
+    }
+
+    const rawRefs = Array.isArray(referenceImageUrls) ? (referenceImageUrls as string[]) : [];
+
+    let sourceSvg = "";
+    const nonSvgRefs: string[] = [];
+    for (const url of rawRefs) {
+      const svg = readLocalSvg(url);
+      if (svg && !sourceSvg) {
+        sourceSvg = svg;
+      } else {
+        nonSvgRefs.push(url);
+      }
     }
 
     // Subscription check
@@ -56,7 +77,7 @@ export async function POST(request: NextRequest) {
         title: data.headline || data.productName || template.name,
         brief: brief as any,
         concept: concept as any,
-        data: data || {},
+        data: { ...(data || {}), referenceImageUrls: rawRefs, editNote: editNote || "" },
         conceptName: concept.name,
         status: "generating",
         prompt: "",
@@ -81,6 +102,9 @@ export async function POST(request: NextRequest) {
           promptHints: template.promptHints as any,
         },
         viewBox,
+        editNote: editNote || undefined,
+        sourceSvg: sourceSvg || undefined,
+        referenceImages: nonSvgRefs,
       },
       Math.max(1, Math.min(2, Number(count) || 1))
     );

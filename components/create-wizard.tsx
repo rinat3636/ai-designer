@@ -31,6 +31,19 @@ import type { GenerationImage } from "@prisma/client";
 import { downloadSvg, downloadRaster, getViewBoxSize } from "@/lib/client-image";
 import { getViewBoxForTemplate } from "@/lib/design";
 
+const EDIT_KEYWORDS =
+  /(сделай|сделайте|измени|измените|поменяй|поменяйте|замени|замените|добавь|добавьте|убери|удали|передвинь|сдвинь|переделай|переделайте|обнови|обновите|отредактируй|отредактируйте|исправь|исправьте|уменьш|увелич|крупнее|меньше|ярче|темнее|светлее|контраст|насыщ|размер|шрифт|текст|цвет|фон|background|change|make|edit|red|blue|green|yellow|black|white|красн|син|зел[её]н|желт|черн|бел|оранж|розов|фиолет|коричн|сер|голуб|бирюз)/i;
+
+function looksLikeEdit(text: string, hasImages: boolean): boolean {
+  if (!text || !hasImages) return false;
+  return EDIT_KEYWORDS.test(text);
+}
+
+function extractSize(text: string): string {
+  const match = text.match(/(\d{2,4})\s?[x×]\s?(\d{2,4})/i);
+  return match ? `${match[1]}x${match[2]}` : "";
+}
+
 type ChatContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
@@ -206,6 +219,12 @@ export function CreateWizard({
     const text = inputText.trim();
     if ((!text && selectedImages.length === 0) || !template) return;
 
+    // If the user uploaded an image and the message looks like an edit request,
+    // bypass the interview and generate a new SVG based on the uploaded design.
+    if (looksLikeEdit(text, selectedImages.length > 0)) {
+      return generateFromImage(text, selectedImages);
+    }
+
     const content: string | ChatContentPart[] =
       selectedImages.length > 0
         ? [
@@ -288,6 +307,74 @@ export function CreateWizard({
     } catch (e: any) {
       setError(e.message || "Ошибка генерации");
       setMode("concepts");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function generateFromImage(editInstruction: string, images: string[]) {
+    if (!template) return;
+
+    const brief: Brief = {
+      businessDesc: currentData.businessDesc || "Загруженный пользователем макет",
+      companyName: currentData.companyName || "",
+      website: currentData.website || "",
+      targetAudience: currentData.targetAudience || "",
+      style: currentData.style || "",
+      colors: Array.isArray(currentData.colors) ? currentData.colors : [],
+      logoUrl: images[0] || "",
+    };
+
+    const size = extractSize(editInstruction) || currentData.size || "";
+    const viewBox = getViewBoxForTemplate(template.slug);
+    const defaultSize = getViewBoxSize(`<svg viewBox="${viewBox}"/>`);
+    const data: Record<string, string> = {
+      ...(currentData.data || {}),
+      size: size || (defaultSize ? `${defaultSize.width}x${defaultSize.height}` : ""),
+      editInstruction,
+    };
+
+    const concept: Concept = {
+      name: "На основе загруженного макета",
+      description: "Сгенерировать SVG на основе загруженного изображения с учётом правки пользователя",
+      explanation: "ИИ повторяет загруженный макет и применяет запрошенное изменение.",
+      palette: brief.colors?.length ? brief.colors : ["#2563eb", "#f8fafc", "#0f172a"],
+      recommendations: ["Сохранить композицию и текст с загруженного изображения", "Применить только запрошенное изменение"],
+    };
+
+    setInputText("");
+    setSelectedImages([]);
+    setLoading(true);
+    setError("");
+    setMode("generating");
+
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateId: template.id,
+          brief,
+          concept,
+          data,
+          referenceImageUrls: images,
+          editNote: editInstruction,
+          count: 1,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        if (res.status === 403) {
+          toast.error(json.error || "Лимит генераций исчерпан. Перейдите на другой тариф.");
+        }
+        throw new Error(json.error);
+      }
+      setGeneration(json.generation);
+      setMode("result");
+      toast.success("Макет на основе изображения готов!");
+    } catch (e: any) {
+      setError(e.message || "Ошибка генерации по изображению");
+      setMode("interview");
     } finally {
       setLoading(false);
     }
@@ -558,7 +645,7 @@ export function CreateWizard({
             <div className="flex flex-wrap gap-2">
               {activeImages.map((url) => (
                 <div key={url} className="relative">
-                  <img src={url} alt="Референс" className="h-14 w-14 rounded-lg border object-cover" />
+                  <img src={url} alt="Референс" className="h-16 w-16 rounded-lg border object-cover md:h-14 md:w-14" />
                   <button
                     type="button"
                     onClick={() => setActiveImages((prev) => prev.filter((u) => u !== url))}
@@ -585,15 +672,16 @@ export function CreateWizard({
               disabled={uploading || mode === "select"}
               onClick={() => fileInputRef.current?.click()}
               title="Прикрепить файл"
+              className="h-11 w-11 shrink-0 md:h-10 md:w-10"
             >
-              <Paperclip className="size-4" />
+              <Paperclip className="size-5 md:size-4" />
             </Button>
             <Textarea
               value={activeInput}
               onChange={(e) => setActiveInput(e.target.value)}
               placeholder={inputPlaceholder}
               rows={1}
-              className="min-h-0 flex-1 resize-none"
+              className="min-h-[44px] flex-1 resize-none text-base md:text-sm"
               onKeyDown={handleChatKeyDown}
               disabled={mode === "select" || loading}
             />
@@ -601,9 +689,11 @@ export function CreateWizard({
               type="button"
               disabled={mode === "select" || loading || (!activeInput.trim() && activeImages.length === 0)}
               onClick={activeSend}
+              className="h-11 shrink-0 px-4 text-base md:h-10 md:px-3 md:text-sm"
             >
-              <Send className="mr-1 size-4" />
-              Отправить
+              <Send className="mr-1 size-5 md:size-4" />
+              <span className="hidden sm:inline">Отправить</span>
+              <span className="sm:hidden">OK</span>
             </Button>
           </div>
         </div>
@@ -631,7 +721,7 @@ export function CreateWizard({
                       selectedTemplateId === t.id ? "ring-2 ring-primary" : ""
                     }`}
                   >
-                    <CardContent className="flex items-start gap-4 pt-6">
+                    <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
                       <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                         {iconFor(t.icon || undefined)}
                       </div>
@@ -737,12 +827,12 @@ export function CreateWizard({
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           <div className="flex-1">
             <Card className="overflow-hidden">
-              <CardContent className="flex min-h-[50vh] items-center justify-center bg-muted/20 p-4">
+              <CardContent className="flex min-h-[30vh] items-center justify-center bg-muted/20 p-2 md:min-h-[50vh] md:p-4">
                 {selectedResultImage ? (
                   <img
                     src={selectedResultImage.url}
                     alt={selectedResultImage.label || "result"}
-                    className="max-h-[70vh] w-full object-contain"
+                    className="max-h-[45vh] w-full object-contain md:max-h-[70vh]"
                   />
                 ) : (
                   <div className="text-muted-foreground">Нет изображений</div>
@@ -756,18 +846,18 @@ export function CreateWizard({
               <CardHeader>
                 <CardTitle className="text-base">Быстрые действия</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-2">
-                <Button className="w-full" onClick={handleDownload} disabled={!selectedResultImage}>
-                  <Download className="mr-2 size-4" /> Скачать
+              <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
+                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
+                  <Download className="mr-2 size-5 sm:size-4" /> Скачать
                 </Button>
-                <Button variant="outline" className="w-full" onClick={handleRegenerate} disabled={!selectedConcept}>
-                  <RefreshCw className="mr-2 size-4" /> Новые варианты
+                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleRegenerate} disabled={!selectedConcept}>
+                  <RefreshCw className="mr-2 size-5 sm:size-4" /> Новые
                 </Button>
-                <Button variant="outline" className="w-full" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
-                  <Plus className="mr-2 size-4" /> Создать похожий
+                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
+                  <Plus className="mr-2 size-5 sm:size-4" /> Похожий
                 </Button>
-                <Button variant="outline" className="w-full" onClick={toggleFavorite}>
-                  <Heart className={`mr-2 size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} />
+                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={toggleFavorite}>
+                  <Heart className={`mr-2 size-5 sm:size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} />
                   {isFavorite ? "В избранном" : "В избранное"}
                 </Button>
               </CardContent>
@@ -815,7 +905,7 @@ export function CreateWizard({
                 {downloadFormat !== "svg" && (
                   <div className="flex flex-wrap gap-1">
                     {["1080x1080", "1080x1920", "1200x630", "1920x1080", "1024x1024"].map((preset) => (
-                      <Button key={preset} variant="outline" size="sm" type="button" onClick={() => applyPreset(preset)}>
+                      <Button key={preset} variant="outline" size="sm" type="button" className="h-9 text-sm sm:h-8 sm:text-xs" onClick={() => applyPreset(preset)}>
                         {preset}
                       </Button>
                     ))}
@@ -837,7 +927,7 @@ export function CreateWizard({
                       selectedResultImage?.id === img.id ? "ring-2 ring-primary" : ""
                     }`}
                   >
-                    <img src={img.url} alt={img.label || "variant"} className="size-16 rounded bg-muted object-contain" />
+                    <img src={img.url} alt={img.label || "variant"} className="size-20 rounded bg-muted object-contain sm:size-16" />
                     <div className="flex-1">
                       <p className="text-sm font-medium">{img.label}</p>
                       {img.isSelected && <Badge variant="secondary">Выбран</Badge>}
@@ -848,14 +938,14 @@ export function CreateWizard({
             </Card>
 
             <div className="flex gap-2">
-              <Button variant="outline" className="flex-1" onClick={handleBack}>
-                <ArrowLeft className="mr-1 size-4" /> Назад
+              <Button variant="outline" className="h-12 flex-1 text-base sm:h-10 sm:text-sm" onClick={handleBack}>
+                <ArrowLeft className="mr-1 size-5 sm:size-4" /> Назад
               </Button>
-              <Button variant="destructive" className="flex-1" onClick={deleteGeneration}>
-                <Trash2 className="mr-1 size-4" /> Удалить
+              <Button variant="destructive" className="h-12 flex-1 text-base sm:h-10 sm:text-sm" onClick={deleteGeneration}>
+                <Trash2 className="mr-1 size-5 sm:size-4" /> Удалить
               </Button>
             </div>
-            <Button asChild variant="outline" className="w-full">
+            <Button asChild variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm">
               <Link href="/projects">В личный кабинет</Link>
             </Button>
           </div>
@@ -895,18 +985,18 @@ export function CreateWizard({
   }
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col gap-4 p-4">
+    <div className="flex h-[100dvh] flex-col gap-2 p-2 md:h-[calc(100vh-4rem)] md:gap-4 md:p-4">
       {error && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       )}
-      <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 md:grid-cols-[360px_1fr]">
-        <div className="order-1 flex min-h-0 flex-col">
+      <div className="flex flex-1 min-h-0 flex-col gap-2 md:grid md:grid-cols-[360px_1fr] md:gap-4">
+        <div className="order-1 flex h-[45%] min-h-0 flex-col md:h-full">
           {ChatPanel()}
         </div>
-        <div className="order-2 min-h-0 overflow-hidden rounded-xl border bg-card shadow-sm">
-          <div className="h-full overflow-y-auto p-4">
+        <div className="order-2 min-h-0 flex-1 overflow-hidden rounded-xl border bg-card shadow-sm md:h-full">
+          <div className="h-full overflow-y-auto p-2 md:p-4">
             {MainPanel()}
           </div>
         </div>
