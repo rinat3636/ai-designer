@@ -1,4 +1,3 @@
-import { Anthropic } from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { placeholderSVG } from "./design";
 
@@ -20,13 +19,55 @@ export type Brief = {
   [key: string]: any;
 };
 
-function getAnthropicClient() {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return null;
-  return new Anthropic({
-    apiKey: key,
-    baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
-  });
+type ChatCompletionResponse = {
+  choices?: { message?: { content?: string } }[];
+};
+
+function getApiConfig() {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const baseURL = process.env.ANTHROPIC_BASE_URL;
+  const model = process.env.ANTHROPIC_MODEL || "claude-fable-5";
+  if (!apiKey || !baseURL) return null;
+  return { apiKey, baseURL, model };
+}
+
+async function callChatCompletion(
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens = 4096
+): Promise<string | null> {
+  const cfg = getApiConfig();
+  if (!cfg) return null;
+
+  try {
+    const res = await fetch(`${cfg.baseURL}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: maxTokens,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("Chat completion error", res.status, text.slice(0, 500));
+      return null;
+    }
+
+    const data = (await res.json()) as ChatCompletionResponse;
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  } catch (e) {
+    console.error("callChatCompletion error", e);
+    return null;
+  }
 }
 
 export async function generateConcepts(brief: Brief): Promise<Concept[]> {
@@ -47,19 +88,12 @@ export async function generateConcepts(brief: Brief): Promise<Concept[]> {
 
 Сгенерируй концепции. Верни ТОЛЬКО JSON.`;
 
-  const anthropic = getAnthropicClient();
-  if (anthropic) {
+  const text = await callChatCompletion(systemPrompt, userPrompt);
+  if (text) {
     try {
-      const res = await anthropic.messages.create({
-        model: process.env.ANTHROPIC_MODEL || "claude-fable-5",
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: [{ role: "user", content: userPrompt }],
-      });
-      const text = (res.content[0] as any)?.text || "";
       return parseConcepts(text);
     } catch (e) {
-      console.error("Anthropic concepts error", e);
+      console.error("Concept parse error", e);
     }
   }
 
@@ -68,20 +102,26 @@ export async function generateConcepts(brief: Brief): Promise<Concept[]> {
 
 function parseConcepts(text: string): Concept[] {
   const cleaned = text.replace(/```json|```/g, "").trim();
-  try {
-    const parsed = JSON.parse(cleaned);
-    const concepts = Array.isArray(parsed.concepts) ? parsed.concepts : parsed;
-    if (!Array.isArray(concepts)) throw new Error("invalid concepts");
-    return concepts.slice(0, 6).map((c: any) => ({
-      name: String(c.name || "Концепция"),
-      description: String(c.description || ""),
-      palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
-      recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
-    }));
-  } catch (e) {
-    console.error("Concept parse error", e, text);
-    return fallbackConcepts();
+  const candidates = [cleaned, cleaned.replace(/\r?\n/g, "")];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      const concepts = Array.isArray(parsed.concepts) ? parsed.concepts : parsed;
+      if (!Array.isArray(concepts)) throw new Error("invalid concepts");
+      return concepts.slice(0, 6).map((c: any) => ({
+        name: String(c.name || "Концепция"),
+        description: String(c.description || ""),
+        palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
+        recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
+      }));
+    } catch {
+      // try next candidate
+    }
   }
+
+  console.error("Concept parse error", text);
+  return fallbackConcepts();
 }
 
 function fallbackConcepts(): Concept[] {
@@ -130,18 +170,15 @@ export async function generateDesigns(
   count = 4,
   signal?: AbortSignal
 ): Promise<{ svg: string; label: string; metadata?: any }[]> {
-  const anthropic = getAnthropicClient();
   const results: { svg: string; label: string; metadata?: any }[] = [];
 
   for (let i = 0; i < count; i++) {
     if (signal?.aborted) break;
     try {
-      if (anthropic) {
-        const svg = await generateOneSvg(anthropic, input, i);
-        if (svg) {
-          results.push({ svg, label: `Вариант ${i + 1}` });
-          continue;
-        }
+      const svg = await generateOneSvg(input, i);
+      if (svg) {
+        results.push({ svg, label: `Вариант ${i + 1}` });
+        continue;
       }
       results.push({ svg: placeholderSVG(input, i), label: `Вариант ${i + 1}` });
     } catch (e) {
@@ -153,24 +190,17 @@ export async function generateDesigns(
   return results;
 }
 
-async function generateOneSvg(
-  client: Anthropic,
-  input: DesignGenerationInput,
-  variantIndex: number
-): Promise<string | null> {
+async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
+  if (!getApiConfig()) return null;
+
   const system =
     "You are an expert graphic designer. Generate a complete, valid SVG 1.1 design. Output raw SVG markup only, without markdown code fences, explanations or comments. Use only system fonts (sans-serif, serif, monospace). Keep text readable and inside the viewBox.";
 
   const userPrompt = buildDesignPrompt(input, variantIndex);
 
-  const res = await client.messages.create({
-    model: process.env.ANTHROPIC_MODEL || "claude-fable-5",
-    max_tokens: 4096,
-    system,
-    messages: [{ role: "user", content: userPrompt }],
-  });
+  const text = await callChatCompletion(system, userPrompt, 4096);
+  if (!text) return null;
 
-  const text = (res.content[0] as any)?.text || "";
   const svgMatch = text.match(/<svg[\s\S]*?<\/svg>/i);
   if (!svgMatch) return null;
   let svg = svgMatch[0];
@@ -184,7 +214,7 @@ async function generateOneSvg(
 function buildDesignPrompt(input: DesignGenerationInput, variantIndex: number): string {
   const { brief, concept, data, template, viewBox } = input;
   const [w, h] = viewBox.split(" ").slice(2).map(Number);
-  const orientation = (w >= h ? "landscape" : "portrait");
+  const orientation = w >= h ? "landscape" : "portrait";
   const styleHints = [
     "clean centered layout",
     "asymmetric composition with accent shape",
