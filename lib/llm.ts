@@ -479,23 +479,21 @@ export async function generateConcepts(
   });
   let systemPrompt =
     promptConfig?.prompt ||
-    `Ты — опытный арт-директор и маркетолог. Проанализируй нишу клиента и предложи 4-6 концепций дизайна.
-
-Верни ТОЛЬКО JSON-объект вида:
+    `Ты — опытный арт-директор. Предложи 3 лаконичные концепции дизайна. Верни ТОЛЬКО JSON-объект вида:
 {
-  "analysis": "2-4 предложения: что работает в нише, какая палитра/стиль подойдут, почему.",
+  "analysis": "1-2 коротких предложения: что работает в нише и какая палитра/стиль подойдут.",
   "concepts": [
     {
       "name": "1-2 слова",
-      "description": "1-2 предложения",
-      "explanation": "1-2 предложения, почему эта концепция подходит конкретно для этого бизнеса/аудитории",
-      "palette": ["#hex", "#hex", "#hex", "#hex", "#hex"],
-      "recommendations": ["...", "...", "..."]
+      "description": "1 предложение",
+      "explanation": "1 предложение, почему подходит этому бизнесу",
+      "palette": ["#hex", "#hex", "#hex"],
+      "recommendations": ["...", "..."]
     }
   ]
 }
 
-Без markdown, без пояснений вне JSON.`;
+Не пиши рассуждения. Без markdown, без текста вне JSON.`;
 
   const templateConceptHint = template?.promptHints?.concept;
   if (templateConceptHint) {
@@ -515,7 +513,7 @@ export async function generateConcepts(
 
 Сначала проведи краткий анализ ниши, затем предложи концепции. Верни ТОЛЬКО JSON.`;
 
-  const text = await callChatCompletion(systemPrompt, userPrompt, 4096, true);
+  const text = await callChatCompletion(systemPrompt, userPrompt, 2500, true, undefined, 0.5);
   if (text) {
     try {
       return parseConcepts(text);

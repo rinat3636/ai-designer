@@ -222,6 +222,11 @@ export function CreateWizard({
     // If the user uploaded an image and the message looks like an edit request,
     // bypass the interview and generate a new SVG based on the uploaded design.
     if (looksLikeEdit(text, selectedImages.length > 0)) {
+      const editContent: ChatContentPart[] = [
+        { type: "text", text },
+        ...selectedImages.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+      ];
+      setMessages((prev) => [...prev, { role: "user", content: editContent }]);
       return generateFromImage(text, selectedImages);
     }
 
