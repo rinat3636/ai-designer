@@ -113,7 +113,7 @@ async function callChatCompletionOnce(
   const cfg = getApiConfig();
   if (!cfg) return { ok: false, retryable: false };
 
-  const timeoutMs = Math.max(90000, maxTokens * 20);
+  const timeoutMs = Math.min(240000, Math.max(90000, maxTokens * 15));
   const timeoutController = new AbortController();
   const timeoutId = setTimeout(() => timeoutController.abort("timeout"), timeoutMs);
 
@@ -130,6 +130,7 @@ async function callChatCompletionOnce(
       model: cfg.model,
       messages: [{ role: "system", content: systemPrompt }, ...messages],
       max_tokens: maxTokens,
+      max_output_tokens: maxTokens,
       reasoning_effort: "low",
     };
     if (typeof temperature === "number") {
@@ -1135,7 +1136,7 @@ ${STABLE_IDS_RULE}
 ${DESIGN_QUALITY_RULES}`;
 
   const userPrompt = isEdit ? buildEditPrompt(input) : buildDesignPrompt(input);
-  const maxTokens = isEdit ? 10000 : 12000;
+  const maxTokens = isEdit ? 16000 : 12000;
 
   async function attempt(): Promise<string | null> {
     let text: string | null = null;

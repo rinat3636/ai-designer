@@ -50,7 +50,7 @@ async function runOnce() {
 
     console.log("3. Wait for result image");
     const resultImg = page.locator("img[src^='/generated/']").first();
-    await resultImg.waitFor({ timeout: 240000 });
+    await resultImg.waitFor({ timeout: 300000 });
     const src = await resultImg.getAttribute("src");
     assert(src && src.includes("/generated/"), "No generated image");
     console.log("   Result image:", src);

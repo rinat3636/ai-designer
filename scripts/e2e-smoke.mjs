@@ -34,7 +34,7 @@ async function runOnce() {
     await page.locator("textarea").fill("Нужен логотип для строительной компании КаркасПро, каркасные дома, минимализм, синий и серый, 1200x1200");
     await page.locator("button:has-text('OK')").click();
     const resultImg = page.locator("img[src^='/generated/']").first();
-    await resultImg.waitFor({ timeout: 240000 });
+    await resultImg.waitFor({ timeout: 300000 });
     const src = await resultImg.getAttribute("src");
     assert(src && src.includes("/generated/"), "No generated image");
     console.log("   Result received:", src);
