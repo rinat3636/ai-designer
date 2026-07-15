@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -52,6 +52,14 @@ export function CreateWizard({
     () => templates.find((t) => t.id === selectedTemplateId) || null,
     [selectedTemplateId, templates]
   );
+
+  // Автопереход после выбора шаблона — на мобильном кнопка «Начать» уходит за экран
+  useEffect(() => {
+    if (selectedTemplateId && step === 0) {
+      setBriefStep(0);
+      setStep(1);
+    }
+  }, [selectedTemplateId, step]);
 
   const categories = useMemo(() => {
     const map = new Map<string, Template[]>();
@@ -131,7 +139,7 @@ export function CreateWizard({
     return Icon ? <Icon className="size-6" /> : <FileImage className="size-6" />;
   }
 
-  function brandDefault(name: string) {
+  const brandDefault = useCallback((name: string) => {
     if (name === "companyName" || name === "headline") return brand?.companyName || brief.companyName || "";
     if (name === "website") return brand?.website || brief.website || "";
     if (name === "phone") return brand?.phone || "";
@@ -145,15 +153,24 @@ export function CreateWizard({
     if (name === "price" || name === "oldPrice") return "";
     if (name === "style") return brief.style || "";
     return "";
-  }
+  }, [brand, brief]);
 
-  function computeDataDefaults() {
+  const computeDataDefaults = useCallback(() => {
     const defaults: Record<string, string> = {};
     for (const f of fields) {
       defaults[f.name] = brandDefault(f.name);
     }
     return defaults;
-  }
+  }, [fields, brandDefault]);
+
+  // Автопереход после выбора концепции
+  useEffect(() => {
+    if (selectedConcept && step === 2) {
+      setDataStep(0);
+      setData(computeDataDefaults());
+      setStep(3);
+    }
+  }, [selectedConcept, step, computeDataDefaults]);
 
   async function generate(finalData: Record<string, string>) {
     if (!template || !selectedConcept) return;
