@@ -113,7 +113,6 @@ export function CreateWizard({
   const [dragOver, setDragOver] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [lastRecommendation, setLastRecommendation] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectionHistoryRef = useRef<GenerationImage[]>([]);
@@ -121,6 +120,40 @@ export function CreateWizard({
   const recommendedForRef = useRef<string>("");
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+
+  function resetWorkspace() {
+    try {
+      localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+    } catch {}
+    setMode("select");
+    setSelectedTemplateId("");
+    setShowTemplates(false);
+    setMessages([]);
+    setCurrentData({});
+    setInputText("");
+    setSelectedImages([]);
+    setConcepts([]);
+    setAnalysis("");
+    setSelectedConcept(null);
+    setGeneration(null);
+    setResultImages([]);
+    setSelectedResultImage(null);
+    setEditMessages([]);
+    setEditInput("");
+    setEditImages([]);
+    setIsFavorite(false);
+    setDownloadFormat("png");
+    setDownloadWidth("");
+    setDownloadHeight("");
+    setLoading(false);
+    setError("");
+    setCompareOpen(false);
+    setFullscreen(false);
+    selectionHistoryRef.current = [];
+    recommendedForRef.current = "";
+    restoredRef.current = true;
+    toast("Новый чат начат");
+  }
 
   const template = useMemo(() => {
     if (selectedTemplateId === UPLOAD_TEMPLATE_ID) return UPLOAD_TEMPLATE;
@@ -152,6 +185,10 @@ export function CreateWizard({
           .then((json) => {
             if (json?.generation) {
               setGeneration(json.generation);
+              setResultImages(json.generation.images || []);
+              const selected = (json.generation.images || []).find((img: any) => img.id === saved.selectedImageId) || json.generation.images?.[0] || null;
+              setSelectedResultImage(selected);
+              setEditMessages(saved.editMessages || []);
               setMode("result");
               recommendedForRef.current = json.generation.id;
               toast("Продолжаем с последнего места");
@@ -164,6 +201,9 @@ export function CreateWizard({
         setCurrentData(saved.currentData || {});
         setConcepts(saved.concepts || []);
         setAnalysis(saved.analysis || "");
+        setSelectedImages(saved.selectedImages || []);
+        setEditImages(saved.editImages || []);
+        setEditMessages(saved.editMessages || []);
         setMode(saved.mode);
       }
     } catch {}
@@ -178,40 +218,22 @@ export function CreateWizard({
           mode,
           selectedTemplateId,
           messages,
+          selectedImages,
           currentData,
           concepts,
           analysis,
           generationId: generation?.id || null,
+          selectedImageId: selectedResultImage?.id || null,
+          editImages,
+          editMessages,
         })
       );
     } catch {}
-  }, [mode, selectedTemplateId, messages, currentData, concepts, analysis, generation]);
+  }, [mode, selectedTemplateId, messages, selectedImages, currentData, concepts, analysis, generation, selectedResultImage, editImages, editMessages]);
 
-  // Proactive review: after a generation the assistant analyzes the result
-  // and suggests improvements the user can apply with one click.
-  useEffect(() => {
-    if (mode !== "result" || !generation || recommendedForRef.current === generation.id) return;
-    recommendedForRef.current = generation.id;
-    fetch(`/api/projects/${generation.id}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction:
-          "Проанализируй текущий дизайн как эксперт и дай максимум 2 конкретные рекомендации по улучшению (например: увеличить заголовок, перенести QR-код). Коротко, списком. Это вопрос-консультация, ничего не меняй.",
-        selectedImageUrl: generation.images?.[0]?.url,
-        messages: [],
-        count: 1,
-      }),
-    })
-      .then((r) => r.json())
-      .then((json) => {
-        if (json.assistantMessage) {
-          setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
-          setLastRecommendation(json.assistantMessage);
-        }
-      })
-      .catch(() => {});
-  }, [mode, generation]);
+  // AI only responds to explicit user requests, so no proactive review is
+  // triggered automatically. The recommendation state is kept available for
+  // future optional manual triggers.
 
   useEffect(() => {
     if (selectedTemplateId && mode === "select") {
@@ -714,12 +736,6 @@ export function CreateWizard({
     sendEditInstruction("Сделай похожий вариант с небольшими отличиями", true);
   }
 
-  function applyRecommendation() {
-    if (!lastRecommendation) return;
-    setLastRecommendation("");
-    sendEditInstruction(`Примени эти рекомендации к текущему дизайну, сохранив всё остальное: ${lastRecommendation}`, true);
-  }
-
   // One-click scaling: create a banner/business card/post/stories/flyer
   // in the same style as the finished design.
   async function handleScaleTo(target: Template) {
@@ -928,7 +944,20 @@ export function CreateWizard({
             <MessageSquare className="size-4 text-primary" />
             <h3 className="font-medium">{isResult ? "Правки" : mode === "upload-edit" ? "Редактор макета" : "Чат с ИИ-дизайнером"}</h3>
           </div>
-          {template && !isResult && <span className="text-xs text-muted-foreground">{template.name}</span>}
+          <div className="flex items-center gap-2">
+            {template && !isResult && <span className="text-xs text-muted-foreground">{template.name}</span>}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={resetWorkspace}
+              disabled={loading}
+            >
+              <Plus className="size-3" />
+              Новый чат
+            </Button>
+          </div>
         </div>
 
         <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
@@ -1001,13 +1030,7 @@ export function CreateWizard({
               </div>
             </div>
           ))}
-          {isResult && lastRecommendation && !loading && (
-            <div className="flex justify-start">
-              <Button size="sm" onClick={applyRecommendation}>
-                <Wand2 className="mr-1 size-4" /> Исправить
-              </Button>
-            </div>
-          )}
+
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Wand2 className="size-4 animate-pulse" />

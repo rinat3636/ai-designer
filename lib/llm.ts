@@ -790,11 +790,15 @@ export function matchStylePreset(text: string): string | null {
   return null;
 }
 
+const EDIT_KEYWORDS =
+  /(сделай|сделайте|измени|измените|поменяй|поменяйте|замени|замените|добавь|добавьте|убери|удали|передвинь|сдвинь|переделай|переделайте|обнови|обновите|отредактируй|отредактируйте|исправь|исправьте|уменьш|увелич|крупнее|меньше|ярче|темнее|светлее|контраст|насыщ|размер|шрифт|текст|цвет|фон|background|change|make|edit|red|blue|green|yellow|black|white|красн|син|зел[её]н|желт|черн|бел|оранж|розов|фиолет|коричн|сер|голуб|бирюз)/i;
+
 async function parseEditInstruction(
   input: DesignGenerationInput,
   instruction: string,
   messages: ChatMessage[] = [],
-  memory?: MemorySnapshot
+  memory?: MemorySnapshot,
+  referenceImages?: string[]
 ): Promise<EditParseResult> {
   const system = `You are a smart AI designer-assistant in a chat conversation. The user is working on a design of type "${input.template.name}" (${input.template.category}). You understand natural, informal speech — the user never has to use special commands.
 
@@ -802,6 +806,7 @@ First classify the latest user message into an intent:
 - "edit" — the user wants any change to the current design, even vaguely worded ("сделай современнее", "мне кажется, пустовато", "хочу, чтобы выглядело дороже", "сделай как у Apple", "передвинь немного вправо"). Translate the vague wish into a concrete professional design change. If the user sends their own prompt, analyze it, improve it if needed, and merge it with any other requests in the message.
 - "revert" — the user wants to undo the last change and return to how it was ("верни как было", "отмени", "нет, предыдущий был лучше").
 - "chat" — the user asks a question or wants advice (design, marketing, branding, colors, fonts, composition, how the service works) without requesting a change. Answer helpfully and concretely in responseToUser. Never refuse with canned phrases; if you can understand the question, help. When useful, proactively suggest 1-2 specific improvements to the current design and briefly explain why.
+- If the user attached any images (reference screenshots) or used words like "зелёный", "красный", "фон", "окно", "цвет", "сделай", "поменяй" — classify as "edit", not "chat".
 
 Additional rules:
 1. Use the full conversation history; references like "он", "этот вариант", "тот телефон" refer to the currently selected design and earlier messages.
@@ -824,7 +829,12 @@ Output valid JSON with these fields:
     .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
     .join("\n");
 
-  const user = `${memory ? `${memoryToPromptText(memory)}\n\n` : ""}Current data:\n${JSON.stringify(input.data, null, 2)}\n\nConversation history:\n${history || "(no previous messages)"}\n\nLatest user request: "${instruction}"\n\nOutput JSON only.`;
+  const imageNote =
+    referenceImages && referenceImages.length > 0
+      ? `The user attached ${referenceImages.length} reference image(s). Treat the message as an edit request and apply the change to the current design using the attached image(s) as reference.`
+      : "";
+
+  const user = `${memory ? `${memoryToPromptText(memory)}\n\n` : ""}Current data:\n${JSON.stringify(input.data, null, 2)}\n\nConversation history:\n${history || "(no previous messages)"}${imageNote ? `\n\n${imageNote}` : ""}\n\nLatest user request: "${instruction}"\n\nOutput JSON only.`;
 
   const text = await callChatCompletion(system, user, 4096, true);
   const fallback: EditParseResult = {
@@ -888,7 +898,20 @@ export async function editDesigns(
 ): Promise<{ svg: string; label: string; clarificationQuestion?: string; chatReply?: string; revert?: boolean }[]> {
   if (!getApiConfig()) return [];
 
-  const parsed = await parseEditInstruction(input, instruction, messages, memory);
+  const parsed = await parseEditInstruction(input, instruction, messages, memory, referenceImages);
+
+  // If the user attached reference images or clearly asks for a change, do not
+  // let the classifier fall back to a generic "chat" response.
+  if (
+    parsed.intent === "chat" &&
+    ((referenceImages && referenceImages.length > 0) || EDIT_KEYWORDS.test(instruction))
+  ) {
+    parsed.intent = "edit";
+    parsed.editSummary = instruction;
+    parsed.responseToUser = "Понял, применяю правку.";
+    parsed.clarificationQuestion = null;
+  }
+
   if (parsed.intent === "revert") {
     return [{ svg: "", label: "", revert: true, chatReply: parsed.responseToUser || "Вернул предыдущий вариант." }];
   }

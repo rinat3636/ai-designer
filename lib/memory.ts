@@ -120,8 +120,11 @@ export async function recordLike(
     const preferredPalette = notes.preferredPalette || [];
     const mergedPalette = [...new Set([...likedPalette, ...preferredPalette])].slice(0, 8);
     const learnedRules = notes.learnedRules || [];
-    if (payload.style && !learnedRules.some((r) => r.includes(payload.style!))) {
+    if (payload.style && !learnedRules.some((r) => r.toLowerCase().includes(payload.style!.toLowerCase()))) {
       learnedRules.push(`Пользователю нравится стиль: ${payload.style}`);
+    }
+    if (likedPalette.length && !learnedRules.some((r) => r.toLowerCase().includes("палитра"))) {
+      learnedRules.push(`Пользователю нравится палитра: ${likedPalette.join(", ")}`);
     }
     return {
       ...notes,
@@ -137,7 +140,12 @@ export async function recordDislike(userId: string, pattern: string, reason?: st
     const dislikes = notes.dislikes || [];
     const entry: DislikeEntry = { pattern, reason, at: new Date().toISOString() };
     const next = [entry, ...dislikes].filter((d, i, arr) => arr.findIndex((x) => x.pattern === d.pattern) === i).slice(0, MAX_DISLIKES);
-    return { ...notes, dislikes: next };
+    const learnedRules = notes.learnedRules || [];
+    const rule = `Избегать: ${reason || pattern}`;
+    if (!learnedRules.some((r) => r.toLowerCase().includes((reason || pattern).toLowerCase()))) {
+      learnedRules.push(rule);
+    }
+    return { ...notes, dislikes: next, learnedRules: learnedRules.slice(0, 10) };
   });
 }
 
@@ -149,14 +157,19 @@ export async function recordEditOutcome(
     const editHistory = notes.editHistory || [];
     const entry: EditMemoryEntry = { ...payload, at: new Date().toISOString() };
     const next = [entry, ...editHistory].slice(0, MAX_EDIT_HISTORY);
-    const avoided = notes.avoidedElements || [];
+    const learnedRules = notes.learnedRules || [];
+    // Summarize revert as a high-level style preference, not the raw old text.
     if (payload.outcome === "revert" && payload.instruction) {
-      avoided.push(`пользователь откатил: ${payload.instruction}`);
+      const short = payload.instruction.slice(0, 60);
+      const rule = `Пользователь отменил подобное изменение: ${short}`;
+      if (!learnedRules.some((r) => r.toLowerCase().includes(short.toLowerCase()))) {
+        learnedRules.push(rule);
+      }
     }
     return {
       ...notes,
       editHistory: next,
-      avoidedElements: [...new Set(avoided)].slice(0, 10),
+      learnedRules: learnedRules.slice(0, 10),
     };
   });
 }
@@ -179,12 +192,12 @@ export function buildMemorySnapshot(userId: string): Promise<MemorySnapshot> {
       palette,
       contacts,
       summary: notes.summary || "",
-      likes: (notes.likes || []).map((l) => `${l.conceptName || "Макет"}${l.reason ? ` — ${l.reason}` : ""}${l.instruction ? ` (после правки: ${l.instruction})` : ""}`).slice(0, 5),
-      dislikes: (notes.dislikes || []).map((d) => d.reason || d.pattern).slice(0, 5),
-      recentEdits: (notes.editHistory || []).slice(0, 5).map((e) => `${e.outcome === "revert" ? "❌ откат" : e.outcome === "favorite" ? "⭐ лучший" : "✅ применено"}: ${e.instruction}`),
+      likes: [],
+      dislikes: [],
+      recentEdits: [],
       learnedRules: (notes.learnedRules || []).slice(0, 8),
       preferredPalette: (notes.preferredPalette || []).slice(0, 6),
-      avoidedElements: (notes.avoidedElements || []).slice(0, 6),
+      avoidedElements: [],
     };
   });
 }
@@ -202,10 +215,6 @@ export function memoryToPromptText(snapshot: MemorySnapshot): string {
     parts.push(`Known contacts: ${JSON.stringify(snapshot.contacts)}`);
   }
   if (snapshot.learnedRules.length) parts.push(`Rules learned from feedback: ${snapshot.learnedRules.join("; ")}`);
-  if (snapshot.likes.length) parts.push(`The user previously liked: ${snapshot.likes.join("; ")}`);
-  if (snapshot.dislikes.length) parts.push(`Avoid: ${snapshot.dislikes.join("; ")}`);
-  if (snapshot.avoidedElements.length) parts.push(`Do not repeat: ${snapshot.avoidedElements.join("; ")}`);
-  if (snapshot.recentEdits.length) parts.push(`Recent edits/outcomes: ${snapshot.recentEdits.join("; ")}`);
   return parts.length ? parts.join("\n") : "No prior memory.";
 }
 
