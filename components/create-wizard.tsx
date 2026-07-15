@@ -388,9 +388,12 @@ export function CreateWizard({
   async function sendEditInstruction(instruction: string, addToChat = true) {
     if (!generation || !selectedResultImage) return;
     const images = editImages;
+    const userContent = [instruction, ...images].filter(Boolean).join("\n");
+    const nextMessages: ChatMessage[] = addToChat
+      ? [...editMessages, { role: "user", content: userContent }]
+      : editMessages;
     if (addToChat) {
-      const content = [instruction, ...images].filter(Boolean).join("\n");
-      setEditMessages((prev) => [...prev, { role: "user", content }]);
+      setEditMessages(nextMessages);
     }
     setEditInput("");
     setEditImages([]);
@@ -405,6 +408,7 @@ export function CreateWizard({
           instruction,
           selectedImageUrl: selectedResultImage.url,
           referenceImageUrls: images,
+          messages: nextMessages,
           count: 2,
         }),
       });

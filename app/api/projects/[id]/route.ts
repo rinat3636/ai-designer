@@ -61,6 +61,7 @@ export async function POST(
     instruction,
     selectedImageUrl,
     referenceImageUrls = [],
+    messages: chatMessages = [],
     count = 2,
   } = body;
 
@@ -128,7 +129,8 @@ export async function POST(
       instruction,
       Math.max(1, Math.min(2, Number(count) || 2)),
       sourceSvg,
-      referenceImages
+      referenceImages,
+      chatMessages
     );
 
     const clarification = designs.find((d) => d.clarificationQuestion);

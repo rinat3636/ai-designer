@@ -43,7 +43,8 @@ async function run() {
     console.log("5. Verify red background in SVG");
     const svgText = await fetch(`${BASE_URL}${src}`).then((r) => r.text());
     assert(svgText.includes("СЕРТИФИКАТ"), "Certificate text not preserved");
-    assert(/fill="(#cc0000|#ef4444|red|#D32F2F|#cc1f1f|#FF0000|#D32F2F|#ef4444)"/i.test(svgText) || svgText.includes("fill=\"red\""), "Background not red");
+    const redMatch = svgText.match(/<rect[^>]*fill="(#[cC][0-9a-fA-F]{5}|#ef4444|red|#FF0000|#D32F2F|#cc0000|#c8102e)"/i);
+    assert(redMatch, "Background not red");
     console.log("   SVG text and red background OK");
   } catch (e) {
     console.error("E2E image edit test failed:", e.message);

@@ -627,18 +627,29 @@ type EditParseResult = {
 
 async function parseEditInstruction(
   input: DesignGenerationInput,
-  instruction: string
+  instruction: string,
+  messages: ChatMessage[] = []
 ): Promise<EditParseResult> {
-  const system = `You are an AI design editor. The user wants to change an existing design.
-Analyze the request and output valid JSON with these fields:
+  const system = `You are an AI design editor in a chat conversation. The user is editing an existing design of type "${input.template.name}" (${input.template.category}).
+
+Your job:
+1. Read the conversation history and the latest user request.
+2. If the user replies with a number/short phrase ("3", "третий", "третий вариант"), resolve it using the assistant's previous multiple-choice options and act on it.
+3. If the request is clear enough, output an updated design data object, an English SVG edit instruction, and a short Russian response.
+4. Only ask a clarification question when the request is truly impossible to infer. Prefer to make a reasonable design choice and proceed rather than asking.
+
+Output valid JSON with these fields:
 - updatedData: object with the same keys as the current data but updated values. Set a value to "" to remove it. Add new keys only if they naturally fit the request (phone, address, qrUrl, website, discount, etc.).
 - editSummary: a concise English instruction for the SVG generator describing the change to apply.
-- responseToUser: a short, friendly Russian acknowledgement of the change or the clarification question.
-- clarificationQuestion: null if the request is clear, otherwise one short multiple-choice or open question in Russian to clarify the intent.
+- responseToUser: a short, friendly Russian acknowledgement or the clarification question.
+- clarificationQuestion: null if the request is clear, otherwise one short Russian question. If multiple-choice, keep the same numbering from the previous assistant message.`;
 
-Current design type: "${input.template.name}" (${input.template.category}).`;
+  const history = messages
+    .slice(-10)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${typeof m.content === "string" ? m.content : JSON.stringify(m.content)}`)
+    .join("\n");
 
-  const user = `Current data:\n${JSON.stringify(input.data, null, 2)}\n\nUser request: "${instruction}"\n\nOutput JSON only.`;
+  const user = `Current data:\n${JSON.stringify(input.data, null, 2)}\n\nConversation history:\n${history || "(no previous messages)"}\n\nLatest user request: "${instruction}"\n\nOutput JSON only.`;
 
   const text = await callChatCompletion(system, user, 4096, true);
   const fallback: EditParseResult = {
@@ -677,11 +688,12 @@ export async function editDesigns(
   count = 2,
   sourceSvg?: string,
   referenceImages?: string[],
+  messages: ChatMessage[] = [],
   signal?: AbortSignal
 ): Promise<{ svg: string; label: string; clarificationQuestion?: string }[]> {
   if (!getApiConfig()) return [];
 
-  const parsed = await parseEditInstruction(input, instruction);
+  const parsed = await parseEditInstruction(input, instruction, messages);
   if (parsed.clarificationQuestion) {
     return [{ svg: "", label: "", clarificationQuestion: parsed.clarificationQuestion }];
   }
@@ -739,7 +751,8 @@ async function generateOneSvg(input: DesignGenerationInput, variantIndex: number
     const refs = (await Promise.all((input.referenceImages || []).map(imageUrlToBase64))).filter(
       (u): u is string => Boolean(u)
     );
-    if (process.env.USE_IMAGE_PROMPT === "true" && !input.sourceSvg) {
+    const useImagePrompt = process.env.USE_IMAGE_PROMPT !== "false";
+    if (useImagePrompt && !isEdit && !input.sourceSvg) {
       const imageUrl = await promptToPngDataUrl(userPrompt, input.viewBox);
       const content: ChatContentPart[] = [{ type: "image_url", image_url: { url: imageUrl } }];
       if (refs.length) {
