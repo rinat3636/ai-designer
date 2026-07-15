@@ -1,65 +1,54 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import * as Icons from "lucide-react";
-import { ArrowLeft, ArrowRight, Wand2, Sparkles, FileImage } from "lucide-react";
+import { ArrowLeft, Wand2, Sparkles, FileImage, Paperclip, Send } from "lucide-react";
 import { ResultGallery } from "./result-gallery";
 import type { Template, Brand, Generation, Concept, Brief } from "@/types";
 
-type FieldDef = { name: string; label: string; type: string; required?: boolean };
+type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
 
-type WizardField = FieldDef & { options?: string[]; placeholder?: string };
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string | ChatContentPart[];
+};
 
 export function CreateWizard({
   templates,
-  brand,
 }: {
   templates: Template[];
   brand: Brand | null;
 }) {
   const [step, setStep] = useState(0);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
-  const [brief, setBrief] = useState<Brief>(() => ({
-    companyName: brand?.companyName || "",
-    businessDesc: brand?.businessDesc || "",
-    website: brand?.website || "",
-    targetAudience: brand?.targetAudience || "",
-    style: brand?.style || "",
-    colors: Array.isArray(brand?.colors) ? (brand?.colors as string[]) : undefined,
-    logoUrl: brand?.logoUrl || "",
-  }));
-  const [briefStep, setBriefStep] = useState(0);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [currentData, setCurrentData] = useState<Record<string, any>>({});
+  const [inputText, setInputText] = useState("");
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [concepts, setConcepts] = useState<Concept[]>([]);
   const [analysis, setAnalysis] = useState<string>("");
   const [selectedConcept, setSelectedConcept] = useState<Concept | null>(null);
-  const [data, setData] = useState<Record<string, string>>({});
-  const [dataStep, setDataStep] = useState(0);
   const [generation, setGeneration] = useState<Generation | null>(null);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const template = useMemo(
     () => templates.find((t) => t.id === selectedTemplateId) || null,
     [selectedTemplateId, templates]
   );
-
-  // Автопереход после выбора шаблона — на мобильном кнопка «Начать» уходит за экран
-  useEffect(() => {
-    if (selectedTemplateId && step === 0) {
-      setBriefStep(0);
-      setStep(1);
-    }
-  }, [selectedTemplateId, step]);
 
   const categories = useMemo(() => {
     const map = new Map<string, Template[]>();
@@ -71,111 +60,143 @@ export function CreateWizard({
     return map;
   }, [templates]);
 
-  const fields = useMemo<FieldDef[]>(() => {
-    if (!template) return [];
-    const f = template.fields as any;
-    if (Array.isArray(f)) return f;
-    return [];
-  }, [template]);
-
-  const briefFields = useMemo<WizardField[]>(() => {
-    const items: WizardField[] = [
-      {
-        name: "businessDesc",
-        label: "Чем занимается компания?",
-        type: "textarea",
-        required: true,
-        placeholder: "Например, интернет-магазин дизайнерской мебели",
-      },
-      { name: "companyName", label: "Название компании", type: "text", required: true },
-      { name: "targetAudience", label: "Целевая аудитория", type: "text" },
-      { name: "website", label: "Сайт", type: "url" },
-      {
-        name: "style",
-        label: "Предпочитаемый стиль",
-        type: "select",
-        options: ["Минимализм", "Премиум", "Современный", "Яркий продающий", "Корпоративный"],
-      },
-      {
-        name: "colors",
-        label: "Фирменные цвета (через запятую)",
-        type: "text",
-        placeholder: "#2563eb, #f8fafc",
-      },
-      { name: "logoUrl", label: "URL логотипа (опционально)", type: "url" },
-    ];
-    return items;
-  }, []);
-
-  async function generateConcepts() {
-    setLoading(true);
-    setError("");
-    try {
-      const res = await fetch("/api/concepts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brief, templateId: template?.id }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error);
-      setAnalysis(json.analysis || "");
-      setConcepts(json.concepts || []);
-    } catch (e: any) {
-      setError(e.message || "Ошибка генерации концепций");
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // Автопереход после выбора шаблона
   useEffect(() => {
-    if (step === 2) {
-      generateConcepts();
+    if (selectedTemplateId && step === 0) {
+      setMessages([]);
+      setCurrentData({});
+      setInputText("");
+      setSelectedImages([]);
+      setStep(1);
+    }
+  }, [selectedTemplateId, step]);
+
+  // Автопрокрутка чата вниз
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, loading]);
+
+  // Автопереход к генерации после выбора концепции
+  useEffect(() => {
+    if (selectedConcept && step === 2) {
+      generate();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [selectedConcept, step]);
 
   function iconFor(name?: string) {
     const Icon = name ? (Icons as any)[name] || FileImage : FileImage;
     return Icon ? <Icon className="size-6" /> : <FileImage className="size-6" />;
   }
 
-  const brandDefault = useCallback((name: string) => {
-    if (name === "companyName" || name === "headline") return brand?.companyName || brief.companyName || "";
-    if (name === "website") return brand?.website || brief.website || "";
-    if (name === "phone") return brand?.phone || "";
-    if (name === "telegram") return brand?.telegram || "";
-    if (name === "email") return brand?.email || "";
-    if (name === "address") return brand?.address || "";
-    if (name === "buttonText") return "Подробнее";
-    if (name === "discount") return "";
-    if (name === "subheadline" || name === "productDesc" || name === "features") return brief.businessDesc || "";
-    if (name === "productName") return brief.companyName || "";
-    if (name === "price" || name === "oldPrice") return "";
-    if (name === "style") return brief.style || "";
-    return "";
-  }, [brand, brief]);
+  function buildBrief(): Brief {
+    const colors = Array.isArray(currentData.colors)
+      ? currentData.colors
+      : typeof currentData.colors === "string"
+      ? currentData.colors
+          .split(/[,;]/)
+          .map((c: string) => c.trim())
+          .filter(Boolean)
+      : [];
+    return {
+      businessDesc: currentData.businessDesc || "",
+      companyName: currentData.companyName || "",
+      website: currentData.website || "",
+      targetAudience: currentData.targetAudience || "",
+      style: currentData.style || "",
+      colors,
+      logoUrl: currentData.logoUrl || currentData.referenceImages?.[0] || "",
+    };
+  }
 
-  const computeDataDefaults = useCallback(() => {
-    const defaults: Record<string, string> = {};
-    for (const f of fields) {
-      defaults[f.name] = brandDefault(f.name);
-    }
-    return defaults;
-  }, [fields, brandDefault]);
+  async function sendMessage() {
+    const text = inputText.trim();
+    if ((!text && selectedImages.length === 0) || !template) return;
 
-  // Автопереход после выбора концепции
-  useEffect(() => {
-    if (selectedConcept && step === 2) {
-      setDataStep(0);
-      setData(computeDataDefaults());
-      setStep(3);
-    }
-  }, [selectedConcept, step, computeDataDefaults]);
+    const content: string | ChatContentPart[] =
+      selectedImages.length > 0
+        ? [
+            { type: "text" as const, text: text || "Вот референс(ы):" },
+            ...selectedImages.map((url) => ({
+              type: "image_url" as const,
+              image_url: { url },
+            })),
+          ]
+        : text;
 
-  async function generate(finalData: Record<string, string>) {
-    if (!template || !selectedConcept) return;
+    const userMessage: ChatMessage = { role: "user", content };
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
+    setInputText("");
+    setSelectedImages([]);
     setLoading(true);
     setError("");
+
+    try {
+      const res = await fetch("/api/interview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateId: template.id,
+          messages: newMessages,
+          currentData,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+
+      setCurrentData((prev) => ({ ...prev, ...(json.extractedData || {}) }));
+      setMessages((prev) => [...prev, { role: "assistant", content: json.message }]);
+
+      if (json.done) {
+        setAnalysis(json.analysis || "");
+        setConcepts(json.concepts || []);
+        setStep(2);
+      }
+    } catch (e: any) {
+      setError(e.message || "Ошибка интервью");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setError("");
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+      setSelectedImages((prev) => [...prev, json.url]);
+    } catch (e: any) {
+      setError(e.message || "Ошибка загрузки файла");
+    } finally {
+      setUploading(false);
+      e.target.value = "";
+    }
+  }
+
+  async function generate() {
+    if (!template || !selectedConcept) return;
+
+    const brief = buildBrief();
+    const data = (currentData.data || {}) as Record<string, string>;
+
+    setLoading(true);
+    setError("");
+    setStep(3);
+
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -184,7 +205,7 @@ export function CreateWizard({
           templateId: template.id,
           brief,
           concept: selectedConcept,
-          data: finalData,
+          data,
           count: 4,
         }),
       });
@@ -196,10 +217,11 @@ export function CreateWizard({
         throw new Error(json.error);
       }
       setGeneration(json.generation);
-      setStep(5);
+      setStep(4);
       toast.success("Макеты готовы!");
     } catch (e: any) {
       setError(e.message || "Ошибка генерации");
+      setStep(2);
     } finally {
       setLoading(false);
     }
@@ -208,190 +230,162 @@ export function CreateWizard({
   function restart() {
     setStep(0);
     setSelectedTemplateId("");
-    setBriefStep(0);
-    setDataStep(0);
+    setMessages([]);
+    setCurrentData({});
+    setInputText("");
+    setSelectedImages([]);
     setConcepts([]);
     setAnalysis("");
     setSelectedConcept(null);
-    setData({});
     setGeneration(null);
     setError("");
   }
 
-  function currentBriefRequiredFilled() {
-    const f = briefFields[briefStep];
-    if (!f) return true;
-    if (!f.required) return true;
-    const value = brief[f.name as keyof Brief];
-    if (f.name === "colors") {
-      return Array.isArray(value) && value.length > 0;
+  function handleBack() {
+    if (step === 1) {
+      setStep(0);
+      setMessages([]);
+      setCurrentData({});
+      setInputText("");
+      setSelectedImages([]);
+      return;
     }
-    return typeof value === "string" ? value.trim().length > 0 : false;
-  }
-
-  function currentDataRequiredFilled() {
-    const f = fields[dataStep];
-    if (!f) return true;
-    if (!f.required) return true;
-    const value = data[f.name];
-    return typeof value === "string" ? value.trim().length > 0 : false;
-  }
-
-  function nextDisabled() {
-    if (loading) return true;
-    if (step === 0) return !template;
-    if (step === 1) return !currentBriefRequiredFilled();
-    if (step === 2) return !selectedConcept;
-    if (step === 3) return !currentDataRequiredFilled();
-    return false;
-  }
-
-  function handleNext() {
-    if (step === 0) {
-      setBriefStep(0);
+    if (step === 2) {
       setStep(1);
       return;
     }
-
-    if (step === 1) {
-      if (briefStep < briefFields.length - 1) {
-        setBriefStep(briefStep + 1);
-        return;
-      }
-      setStep(2);
-      return;
-    }
-
-    if (step === 2) {
-      setDataStep(0);
-      setData(computeDataDefaults());
-      setStep(3);
-      return;
-    }
-
-    if (step === 3) {
-      if (dataStep < fields.length - 1) {
-        setDataStep(dataStep + 1);
-        return;
-      }
-      const finalData = { ...computeDataDefaults(), ...data };
-      setData(finalData);
-      setStep(4);
-      generate(finalData);
-      return;
-    }
-  }
-
-  function handleBack() {
-    if (step === 1) {
-      if (briefStep > 0) {
-        setBriefStep(briefStep - 1);
-        return;
-      }
-      setStep(0);
-      return;
-    }
-
-    if (step === 3) {
-      if (dataStep > 0) {
-        setDataStep(dataStep - 1);
-        return;
-      }
-      setStep(2);
-      return;
-    }
-
-    if (step === 5) {
-      // Returning to results does not make sense to edit; just go home.
+    if (step === 4) {
       restart();
-      return;
     }
-
-    setStep(Math.max(0, step - 1));
   }
 
-  function renderField(
-    f: WizardField,
-    value: string,
-    onChange: (val: string) => void
-  ) {
-    if (f.type === "textarea") {
-      return (
-        <Textarea
-          id={f.name}
-          value={value}
-          placeholder={f.placeholder || ""}
-          onChange={(e) => onChange(e.target.value)}
-          rows={4}
-        />
-      );
+  function renderMessageContent(content: string | ChatContentPart[]) {
+    if (typeof content === "string") {
+      return <p className="whitespace-pre-wrap text-sm leading-relaxed">{content}</p>;
     }
-
-    if (f.type === "select" && f.options) {
-      return (
-        <Select value={value || undefined} onValueChange={(v) => onChange(v || "")}>
-          <SelectTrigger id={f.name}>
-            <SelectValue placeholder="Выберите стиль" />
-          </SelectTrigger>
-          <SelectContent>
-            {f.options.map((o) => (
-              <SelectItem key={o} value={o}>
-                {o}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      );
-    }
-
     return (
-      <Input
-        id={f.name}
-        type={f.type || "text"}
-        value={value}
-        placeholder={f.placeholder || ""}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <div className="space-y-2">
+        {content.map((part, i) =>
+          part.type === "text" ? (
+            <p key={i} className="whitespace-pre-wrap text-sm leading-relaxed">
+              {part.text}
+            </p>
+          ) : (
+            <img
+              key={i}
+              src={part.image_url.url}
+              alt="Референс"
+              className="max-h-40 rounded-lg border object-cover"
+            />
+          )
+        )}
+      </div>
     );
   }
 
-  function renderBriefStep() {
-    const f = briefFields[briefStep];
-    if (!f) return null;
-
-    const value =
-      f.name === "colors"
-        ? Array.isArray(brief.colors)
-          ? brief.colors.join(", ")
-          : ""
-        : (brief[f.name as keyof Brief] as string) || "";
-
-    function update(val: string) {
-      if (f.name === "colors") {
-        setBrief({
-          ...brief,
-          colors: val.split(/[,;]/).map((c) => c.trim()).filter(Boolean),
-        });
-      } else {
-        setBrief({ ...brief, [f.name]: val });
-      }
-    }
-
+  function renderInterviewStep() {
     return (
-      <div className="mx-auto max-w-2xl space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold">{f.label}</h1>
+      <div className="mx-auto flex max-w-3xl flex-col gap-4">
+        <div className="text-center">
+          <h1 className="text-2xl font-semibold">Диалог с ИИ-дизайнером</h1>
           <p className="text-muted-foreground">
-            Вопрос {briefStep + 1} из {briefFields.length}
+            Отвечайте текстом или прикрепляйте фото-референсы. ИИ задаст нужные вопросы по одному.
           </p>
         </div>
-        <Card>
-          <CardContent className="space-y-4 pt-6">
-            <div className="space-y-2">
-              <Label htmlFor={f.name}>
-                {f.label} {f.required && <span className="text-destructive">*</span>}
-              </Label>
-              {renderField(f, value, update)}
+
+        <Card className="flex h-[55vh] flex-col">
+          <CardContent className="flex flex-1 flex-col gap-4 overflow-hidden p-4">
+            <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto pr-2">
+              {messages.length === 0 && (
+                <div className="text-center text-sm text-muted-foreground">
+                  Напишите первое сообщение, например: «Нужен логотип для кофейни в стиле минимализма».
+                </div>
+              )}
+              {messages.map((m, i) => (
+                <div
+                  key={i}
+                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-xl px-4 py-3 text-sm ${
+                      m.role === "user"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-foreground"
+                    }`}
+                  >
+                    {renderMessageContent(m.content)}
+                  </div>
+                </div>
+              ))}
+              {loading && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Wand2 className="size-4 animate-pulse" />
+                  ИИ печатает…
+                </div>
+              )}
+            </div>
+
+            {selectedImages.length > 0 && (
+              <div className="flex flex-wrap gap-2 border-t pt-2">
+                {selectedImages.map((url) => (
+                  <div key={url} className="relative">
+                    <img
+                      src={url}
+                      alt="Референс"
+                      className="h-16 w-16 rounded-lg border object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedImages((prev) => prev.filter((u) => u !== url))
+                      }
+                      className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-destructive text-xs text-white"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-2 border-t pt-3">
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                disabled={uploading}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Paperclip className="size-4" />
+              </Button>
+              <Textarea
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Ваш ответ…"
+                rows={2}
+                className="min-h-0 flex-1 resize-none"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                disabled={loading || (!inputText.trim() && selectedImages.length === 0)}
+                onClick={sendMessage}
+              >
+                <Send className="mr-1 size-4" />
+                Отправить
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -399,54 +393,59 @@ export function CreateWizard({
     );
   }
 
-  function renderDataStep() {
-    if (fields.length === 0) {
-      return (
-        <div className="mx-auto max-w-2xl space-y-6 text-center">
-          <h1 className="text-2xl font-semibold">Детали макета</h1>
-          <p className="text-muted-foreground">Для этого шаблона не нужно заполнять дополнительные данные.</p>
-          <p className="text-muted-foreground">Нажмите «Сгенерировать», чтобы продолжить.</p>
-        </div>
-      );
-    }
-
-    const f = fields[dataStep];
-    if (!f) return null;
-
-    const value = data[f.name] ?? "";
-
+  function renderConceptsStep() {
     return (
-      <div className="mx-auto max-w-2xl space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold">{f.label}</h1>
-          <p className="text-muted-foreground">
-            {dataStep + 1} из {fields.length}
-          </p>
+      <div className="space-y-6">
+        {analysis && (
+          <Card className="border-primary/20 bg-primary/5">
+            <CardHeader>
+              <CardTitle className="text-base">Анализ ниши</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm leading-relaxed">{analysis}</p>
+            </CardContent>
+          </Card>
+        )}
+        <div className="text-center">
+          <h1 className="text-2xl font-semibold">Выберите концепцию</h1>
+          <p className="text-muted-foreground">{concepts.length} вариантов на основе вашей ниши</p>
         </div>
-        <Card>
-          <CardContent className="space-y-4 pt-6">
-            <div className="space-y-2">
-              <Label htmlFor={f.name}>
-                {f.label} {f.required && <span className="text-destructive">*</span>}
-              </Label>
-              {f.type === "textarea" ? (
-                <Textarea
-                  id={f.name}
-                  value={value}
-                  onChange={(e) => setData({ ...data, [f.name]: e.target.value })}
-                  rows={4}
-                />
-              ) : (
-                <Input
-                  id={f.name}
-                  type={f.type || "text"}
-                  value={value}
-                  onChange={(e) => setData({ ...data, [f.name]: e.target.value })}
-                />
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {concepts.map((c) => (
+            <Card
+              key={c.name}
+              onClick={() => setSelectedConcept(c)}
+              className={`cursor-pointer transition hover:border-primary ${
+                selectedConcept?.name === c.name ? "ring-2 ring-primary" : ""
+              }`}
+            >
+              <CardHeader>
+                <CardTitle>{c.name}</CardTitle>
+                <CardDescription>{c.description}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {c.explanation && (
+                  <p className="text-sm text-muted-foreground">{c.explanation}</p>
+                )}
+                <div className="flex gap-2">
+                  {c.palette.map((color) => (
+                    <span
+                      key={color}
+                      className="size-6 rounded-full border"
+                      style={{ backgroundColor: color }}
+                      title={color}
+                    />
+                  ))}
+                </div>
+                <ul className="space-y-1 text-sm text-muted-foreground">
+                  {c.recommendations.slice(0, 3).map((r, i) => (
+                    <li key={i}>• {r}</li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
@@ -458,7 +457,9 @@ export function CreateWizard({
           <div className="space-y-6">
             <div className="text-center">
               <h1 className="text-2xl font-semibold">Выберите тип дизайна</h1>
-              <p className="text-muted-foreground">Выберите шаблон, который ближе всего к вашей задаче</p>
+              <p className="text-muted-foreground">
+                После выбора начнётся диалог с ИИ-дизайнером
+              </p>
             </div>
             <div className="space-y-8">
               {Array.from(categories.entries()).map(([catKey, items]) => (
@@ -492,14 +493,14 @@ export function CreateWizard({
         );
 
       case 1:
-        return renderBriefStep();
+        return renderInterviewStep();
 
       case 2:
         if (loading) {
           return (
             <div className="space-y-6 text-center">
               <Wand2 className="mx-auto size-10 animate-pulse text-primary" />
-              <h2 className="text-2xl font-semibold">Анализируем нишу и генерируем концепции</h2>
+              <h2 className="text-2xl font-semibold">Готовим концепции</h2>
               <div className="mx-auto max-w-md space-y-3">
                 <Skeleton className="h-24 w-full" />
                 <Skeleton className="h-24 w-full" />
@@ -508,65 +509,9 @@ export function CreateWizard({
             </div>
           );
         }
-        return (
-          <div className="space-y-6">
-            {analysis && (
-              <Card className="border-primary/20 bg-primary/5">
-                <CardHeader>
-                  <CardTitle className="text-base">Анализ ниши</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm leading-relaxed">{analysis}</p>
-                </CardContent>
-              </Card>
-            )}
-            <div className="text-center">
-              <h1 className="text-2xl font-semibold">Выберите концепцию</h1>
-              <p className="text-muted-foreground">{concepts.length} вариантов на основе вашей ниши</p>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {concepts.map((c) => (
-                <Card
-                  key={c.name}
-                  onClick={() => setSelectedConcept(c)}
-                  className={`cursor-pointer transition hover:border-primary ${
-                    selectedConcept?.name === c.name ? "ring-2 ring-primary" : ""
-                  }`}
-                >
-                  <CardHeader>
-                    <CardTitle>{c.name}</CardTitle>
-                    <CardDescription>{c.description}</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    {c.explanation && (
-                      <p className="text-sm text-muted-foreground">{c.explanation}</p>
-                    )}
-                    <div className="flex gap-2">
-                      {c.palette.map((color) => (
-                        <span
-                          key={color}
-                          className="size-6 rounded-full border"
-                          style={{ backgroundColor: color }}
-                          title={color}
-                        />
-                      ))}
-                    </div>
-                    <ul className="space-y-1 text-sm text-muted-foreground">
-                      {c.recommendations.slice(0, 3).map((r, i) => (
-                        <li key={i}>• {r}</li>
-                      ))}
-                    </ul>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-        );
+        return renderConceptsStep();
 
       case 3:
-        return renderDataStep();
-
-      case 4:
         return (
           <div className="space-y-6 text-center">
             <Sparkles className="mx-auto size-12 animate-pulse text-primary" />
@@ -576,9 +521,9 @@ export function CreateWizard({
           </div>
         );
 
-      case 5:
+      case 4:
         if (generation) {
-          return <ResultGallery generation={generation} onRegenerate={() => { setStep(4); generate(data); }} />;
+          return <ResultGallery generation={generation} onRegenerate={() => { setStep(2); generate(); }} />;
         }
         return null;
 
@@ -587,12 +532,31 @@ export function CreateWizard({
     }
   }
 
-  const nextLabel =
-    step === 0 ? "Начать" :
-    step === 1 ? (briefStep < briefFields.length - 1 ? "Далее" : "Продолжить") :
-    step === 2 ? "Далее" :
-    step === 3 ? (fields.length > 0 && dataStep < fields.length - 1 ? "Далее" : "Сгенерировать") :
-    "Далее";
+  function renderBottomControls() {
+    if (step === 0 || step === 3) return null;
+
+    if (step === 4) {
+      return (
+        <div className="mt-8 flex justify-center gap-3">
+          <Button variant="outline" onClick={restart}>
+            Создать новый дизайн
+          </Button>
+          <Button asChild>
+            <Link href="/projects">В личный кабинет</Link>
+          </Button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-8 flex items-center justify-between">
+        <Button variant="outline" onClick={handleBack} disabled={loading}>
+          <ArrowLeft className="mr-1 size-4" /> Назад
+        </Button>
+        <div />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl p-4 py-8">
@@ -602,42 +566,7 @@ export function CreateWizard({
         </div>
       )}
       {renderStep()}
-
-      {step < 5 && (
-        <div className="mt-8 flex items-center justify-between">
-          <Button variant="outline" onClick={handleBack} disabled={step === 0 || loading}>
-            <ArrowLeft className="mr-1 size-4" /> Назад
-          </Button>
-          {step === 4 ? (
-            <Button disabled>
-              <Sparkles className="mr-1 size-4 animate-spin" /> Генерация...
-            </Button>
-          ) : (
-            <Button onClick={handleNext} disabled={nextDisabled()}>
-              {step === 3 && fields.length > 0 && dataStep === fields.length - 1 ? (
-                <>
-                  <Sparkles className="mr-1 size-4" /> Сгенерировать
-                </>
-              ) : (
-                <>
-                  {nextLabel} <ArrowRight className="ml-1 size-4" />
-                </>
-              )}
-            </Button>
-          )}
-        </div>
-      )}
-
-      {step === 5 && (
-        <div className="mt-8 flex justify-center gap-3">
-          <Button variant="outline" onClick={restart}>
-            Создать новый дизайн
-          </Button>
-          <Button asChild>
-            <Link href="/projects">В личный кабинет</Link>
-          </Button>
-        </div>
-      )}
+      {renderBottomControls()}
     </div>
   );
 }

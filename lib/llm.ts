@@ -25,6 +25,32 @@ export type Brief = {
   [key: string]: any;
 };
 
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type ChatMessage = {
+  role: "user" | "assistant" | "system";
+  content: string | ChatContentPart[];
+};
+
+export type InterviewResult = {
+  message: string;
+  extractedData: Record<string, any>;
+  done: boolean;
+  analysis?: string;
+  concepts?: Concept[];
+};
+
+type InterviewTemplate = {
+  slug: string;
+  name: string;
+  category: string;
+  description?: string | null;
+  fields?: any;
+  promptHints?: any;
+};
+
 type ChatCompletionResponse = {
   choices?: { message?: { content?: string } }[];
 };
@@ -37,9 +63,9 @@ function getApiConfig() {
   return { apiKey, baseURL, model };
 }
 
-async function callChatCompletion(
+async function callChatCompletionRaw(
   systemPrompt: string,
-  userPrompt: string,
+  messages: ChatMessage[],
   maxTokens = 4096
 ): Promise<string | null> {
   const cfg = getApiConfig();
@@ -54,10 +80,7 @@ async function callChatCompletion(
       },
       body: JSON.stringify({
         model: cfg.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
+        messages: [{ role: "system", content: systemPrompt }, ...messages],
         max_tokens: maxTokens,
       }),
     });
@@ -71,9 +94,165 @@ async function callChatCompletion(
     const data = (await res.json()) as ChatCompletionResponse;
     return data.choices?.[0]?.message?.content?.trim() || null;
   } catch (e) {
-    console.error("callChatCompletion error", e);
+    console.error("callChatCompletionRaw error", e);
     return null;
   }
+}
+
+async function callChatCompletion(
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens = 4096
+): Promise<string | null> {
+  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens);
+}
+
+export async function chatInterview(
+  messages: ChatMessage[],
+  template: InterviewTemplate,
+  currentData: Record<string, any> = {}
+): Promise<InterviewResult> {
+  const cfg = getApiConfig();
+  if (!cfg) {
+    return fallbackInterview(template, currentData);
+  }
+
+  const fields = Array.isArray(template.fields)
+    ? template.fields.map((f: any) => `- ${f.name} (${f.label}${f.required ? ", обязательно" : ""})`).join("\n")
+    : "";
+
+  const conceptHint = template.promptHints?.concept || "";
+  const designHint = template.promptHints?.design || "";
+
+  const systemPrompt = `Ты — профессиональный арт-директор и дизайнер. Веди диалог с клиентом, чтобы создать дизайн для типа "${template.name}" (${template.category}).
+
+Твоя задача — по одному короткому профессиональному вопросу собрать всё необходимое. Прими любую информацию, которую клиент даёт сам, включая загруженные фото-референсы. Если клиент загружает изображение, прокомментируй, как его можно использовать, и задай уточняющий вопрос.
+
+Не задавай все вопросы сразу — только один за раз. Когда информации достаточно (обычно после 3-6 вопросов), предложи 4-6 концепций дизайна.
+
+Справка по типу дизайна:
+- Описание: ${template.description || ""}
+- Подсказка для концепций: ${conceptHint}
+- Подсказка для макета: ${designHint}
+
+Поля макета, которые нужно собрать (можно спрашивать неявно, через диалог):
+${fields || "- нет специфических полей"}
+
+В каждом ответе возвращай ТОЛЬКО JSON строго такого вида, без markdown:
+{
+  "message": "то, что ты говоришь клиенту (на русском, один вопрос или представление концепций)",
+  "extractedData": {
+    "businessDesc": "...",
+    "companyName": "...",
+    "targetAudience": "...",
+    "style": "...",
+    "colors": ["#hex", "#hex"],
+    "logoUrl": "...",
+    "referenceImages": ["url", "url"],
+    "data": { "headline": "...", "subheadline": "..." }
+  },
+  "done": false,
+  "analysis": null,
+  "concepts": null
+}
+
+Когда готов предложить концепции, установи done: true и верни:
+{
+  "message": "Вот несколько концепций. Выберите подходящую:",
+  "extractedData": { ... },
+  "done": true,
+  "analysis": "2-4 предложения анализа ниши",
+  "concepts": [
+    { "name": "...", "description": "...", "explanation": "...", "palette": ["#hex", ...], "recommendations": ["..."] }
+  ]
+}
+
+Важно:
+- colors может быть строкой или массивом hex.
+- referenceImages — массив URL загруженных референсов.
+- data — объект с полями макета (headline, subheadline и т.д.).
+- Не показывай JSON клиенту, только message.
+
+Текущие собранные данные: ${JSON.stringify(currentData)}`;
+
+  const text = await callChatCompletionRaw(systemPrompt, messages, 4096);
+  if (!text) return fallbackInterview(template, currentData);
+
+  return await parseInterviewResponse(text, template, currentData);
+}
+
+async function parseInterviewResponse(
+  text: string,
+  template: InterviewTemplate,
+  currentData: Record<string, any>
+): Promise<InterviewResult> {
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  const candidates = [cleaned, cleaned.replace(/\r?\n/g, "")];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      const extractedData = { ...currentData, ...(parsed.extractedData || {}) };
+
+      const result: InterviewResult = {
+        message: String(parsed.message || ""),
+        extractedData,
+        done: Boolean(parsed.done),
+      };
+
+      if (result.done) {
+        result.analysis = typeof parsed.analysis === "string" ? parsed.analysis : undefined;
+        result.concepts = Array.isArray(parsed.concepts)
+          ? parsed.concepts.slice(0, 6).map((c: any) => ({
+              name: String(c.name || "Концепция"),
+              description: String(c.description || ""),
+              explanation: typeof c.explanation === "string" ? c.explanation : undefined,
+              palette: Array.isArray(c.palette) ? c.palette.map(String) : ["#2563eb", "#f8fafc", "#0f172a"],
+              recommendations: Array.isArray(c.recommendations) ? c.recommendations.map(String) : [],
+            }))
+          : undefined;
+      }
+
+      return result;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  console.error("Interview parse error", text);
+  return fallbackInterview(template, currentData);
+}
+
+async function fallbackInterview(
+  template: InterviewTemplate,
+  currentData: Record<string, any>
+): Promise<InterviewResult> {
+  if (!currentData.businessDesc && !currentData.companyName) {
+    return {
+      message: "Расскажите, пожалуйста, чем занимается ваша компания? Это поможет мне подобрать правильный стиль.",
+      extractedData: currentData,
+      done: false,
+    };
+  }
+
+  const brief: Brief = {
+    businessDesc: currentData.businessDesc || "",
+    companyName: currentData.companyName || "",
+    website: currentData.website || "",
+    targetAudience: currentData.targetAudience || "",
+    style: currentData.style || "",
+    colors: Array.isArray(currentData.colors) ? currentData.colors : [],
+    logoUrl: currentData.logoUrl || (currentData.referenceImages?.[0] || ""),
+  };
+
+  const conceptResult = await generateConcepts(brief, template);
+  return {
+    message: "Вот несколько концепций. Выберите подходящую:",
+    extractedData: currentData,
+    done: true,
+    analysis: conceptResult.analysis,
+    concepts: conceptResult.concepts,
+  };
 }
 
 export async function generateConcepts(
@@ -108,7 +287,9 @@ export async function generateConcepts(
     systemPrompt += `\n\nУточнение для типа дизайна "${template.name}": ${templateConceptHint}`;
   }
 
-  const templateLine = template ? `\n- Тип дизайна: ${template.name} (${template.category})` : "";
+  const templateLine = template
+    ? `\n- Тип дизайна: ${template.name} (${template.category})`
+    : "";
   const userPrompt = `Бриф клиента:
 - Название: ${brief.companyName || "—"}
 - Чем занимается: ${brief.businessDesc || "—"}

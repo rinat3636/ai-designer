@@ -36,6 +36,7 @@ yarn-error.log*
 
 # generated assets
 /public/generated/
+/public/uploads/
 
 # local database
 *.db
