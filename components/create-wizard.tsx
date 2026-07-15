@@ -103,6 +103,8 @@ export function CreateWizard({
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectionHistoryRef = useRef<GenerationImage[]>([]);
@@ -244,13 +246,8 @@ export function CreateWizard({
     e.target.value = "";
   }
 
-  async function sendMessage() {
-    const text = inputText.trim();
-
-    // On the first screen, resolve the template from free-form text:
-    // "сделай Stories для кофейни" selects the right template automatically.
-    if (mode === "select") {
-      if (!text) return;
+  async function startFromText(text: string) {
+    if (!text) return;
       setLoading(true);
       setError("");
       try {
@@ -301,6 +298,15 @@ export function CreateWizard({
       } finally {
         setLoading(false);
       }
+  }
+
+  async function sendMessage() {
+    const text = inputText.trim();
+
+    // On the first screen, resolve the template from free-form text:
+    // "сделай Stories для кофейни" selects the right template automatically.
+    if (mode === "select") {
+      await startFromText(text);
       return;
     }
 
@@ -737,8 +743,44 @@ export function CreateWizard({
 
         <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
           {activeMessages.length === 0 && mode === "select" && (
-            <div className="text-center text-sm text-muted-foreground">
-              Напишите, что нужно, например: «Сделай Stories 1080x1920 для кофейни» — и я сам подберу шаблон. Или выберите тип дизайна справа.
+            <div className="space-y-3">
+              <div className="flex justify-start">
+                <div className="max-w-[90%] rounded-xl bg-muted px-3 py-2 text-sm text-foreground">
+                  Здравствуйте! Что вы хотите создать сегодня? Выберите вариант или просто опишите задачу своими словами.
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {["Логотип", "Баннер", "Карточка товара", "Инфографика", "Визитка"].map((label) => (
+                  <Button
+                    key={label}
+                    type="button"
+                    variant="outline"
+                    className="h-11 justify-start text-sm"
+                    disabled={loading}
+                    onClick={() => startFromText(`Нужен ${label.toLowerCase()}`)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-11 justify-start text-sm"
+                  disabled={loading}
+                  onClick={() => setShowTemplates(true)}
+                >
+                  Другое
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="col-span-2 h-11 justify-start text-sm"
+                  disabled={loading}
+                  onClick={() => setSelectedTemplateId(UPLOAD_TEMPLATE_ID)}
+                >
+                  <Upload className="mr-2 size-4" /> Редактировать свой макет
+                </Button>
+              </div>
             </div>
           )}
           {activeMessages.length === 0 && mode === "upload-edit" && (
@@ -1010,46 +1052,95 @@ export function CreateWizard({
 
   function ResultWorkspace() {
     if (!generation) return null;
+    const selectedIndex = resultImages.findIndex((i) => i.id === selectedResultImage?.id);
+    const compareImage =
+      selectionHistoryRef.current[selectionHistoryRef.current.length - 1] ||
+      (selectedIndex > 0 ? resultImages[selectedIndex - 1] : null);
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto p-1">
+        {fullscreen && selectedResultImage && (
+          <div
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/90 p-4"
+            onClick={() => setFullscreen(false)}
+          >
+            <img
+              src={selectedResultImage.url}
+              alt={selectedResultImage.label || "result"}
+              className="max-h-[85vh] max-w-full object-contain"
+            />
+            <Button variant="secondary" className="mt-4" onClick={() => setFullscreen(false)}>
+              Закрыть
+            </Button>
+          </div>
+        )}
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           <div className="flex-1">
             <Card className="overflow-hidden">
               <CardContent className="flex min-h-[30vh] items-center justify-center bg-muted/20 p-2 md:min-h-[50vh] md:p-4">
-                {selectedResultImage ? (
+                {compareOpen && compareImage && selectedResultImage ? (
+                  <div className="grid w-full grid-cols-2 gap-2">
+                    {[compareImage, selectedResultImage].map((img, idx) => (
+                      <div key={img.id + idx} className="flex flex-col items-center gap-2">
+                        <p className="text-xs text-muted-foreground">{idx === 0 ? "Предыдущий" : "Текущий"}</p>
+                        <img src={img.url} alt={img.label || "variant"} className="max-h-[40vh] w-full object-contain md:max-h-[60vh]" />
+                        <Button
+                          size="sm"
+                          variant={idx === 1 ? "default" : "outline"}
+                          onClick={() => {
+                            setSelectedResultImage(img);
+                            setCompareOpen(false);
+                            toast("Вариант выбран — дальнейшие правки применяются к нему");
+                          }}
+                        >
+                          Выбрать победителя
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : selectedResultImage ? (
                   <img
                     src={selectedResultImage.url}
                     alt={selectedResultImage.label || "result"}
-                    className="max-h-[45vh] w-full object-contain md:max-h-[70vh]"
+                    className="max-h-[45vh] w-full cursor-zoom-in object-contain md:max-h-[70vh]"
+                    onClick={() => setFullscreen(true)}
                   />
                 ) : (
                   <div className="text-muted-foreground">Нет изображений</div>
                 )}
               </CardContent>
             </Card>
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <Button className="h-11 text-sm" onClick={handleEditFocus} disabled={!selectedResultImage}>
+                <MessageSquare className="mr-1 size-4" /> Изменить
+              </Button>
+              <Button className="h-11 text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
+                <Download className="mr-1 size-4" /> Скачать
+              </Button>
+              <Button variant="outline" className="h-11 text-sm" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
+                <Plus className="mr-1 size-4" /> Похожий
+              </Button>
+              <Button
+                variant={compareOpen ? "default" : "outline"}
+                className="h-11 text-sm"
+                onClick={() => setCompareOpen((v) => !v)}
+                disabled={!compareImage}
+              >
+                <RefreshCw className="mr-1 size-4" /> Сравнить
+              </Button>
+              <Button variant="outline" className="h-11 text-sm" onClick={toggleFavorite}>
+                <Heart className={`mr-1 size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} /> Лучший
+              </Button>
+            </div>
           </div>
 
           <div className="flex w-full shrink-0 flex-col gap-3 sm:w-64 lg:w-72">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Быстрые действия</CardTitle>
+                <CardTitle className="text-base">Ещё</CardTitle>
               </CardHeader>
               <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
-                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleEditFocus} disabled={!selectedResultImage}>
-                  <MessageSquare className="mr-2 size-5 sm:size-4" /> Редактировать
-                </Button>
-                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
-                  <Download className="mr-2 size-5 sm:size-4" /> Скачать
-                </Button>
                 <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleRegenerate} disabled={!selectedConcept}>
-                  <RefreshCw className="mr-2 size-5 sm:size-4" /> Новые
-                </Button>
-                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
-                  <Plus className="mr-2 size-5 sm:size-4" /> Похожий
-                </Button>
-                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={toggleFavorite}>
-                  <Heart className={`mr-2 size-5 sm:size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} />
-                  {isFavorite ? "В избранном" : "В избранное"}
+                  <RefreshCw className="mr-2 size-5 sm:size-4" /> Новые варианты
                 </Button>
               </CardContent>
             </Card>
@@ -1107,10 +1198,10 @@ export function CreateWizard({
 
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Варианты</CardTitle>
+                <CardTitle className="text-base">История версий</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2">
-                {resultImages.map((img) => (
+                {resultImages.map((img, idx) => (
                   <button
                     key={img.id}
                     onClick={() => setSelectedResultImage(img)}
@@ -1120,8 +1211,9 @@ export function CreateWizard({
                   >
                     <img src={img.url} alt={img.label || "variant"} className="size-20 rounded bg-muted object-contain sm:size-16" />
                     <div className="flex-1">
-                      <p className="text-sm font-medium">{img.label}</p>
-                      {img.isSelected && <Badge variant="secondary">Выбран</Badge>}
+                      <p className="text-sm font-medium">Версия {idx + 1}</p>
+                      {img.label && <p className="text-xs text-muted-foreground">{img.label}</p>}
+                      {selectedResultImage?.id === img.id && <Badge variant="secondary">Текущая</Badge>}
                     </div>
                   </button>
                 ))}
