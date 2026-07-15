@@ -586,6 +586,8 @@ export type DesignGenerationInput = {
   template: { slug: string; name: string; category: string; promptHints?: any };
   viewBox: string;
   editNote?: string;
+  sourceSvg?: string;
+  referenceImages?: string[];
 };
 
 export async function generateDesigns(
@@ -668,6 +670,8 @@ export async function editDesigns(
   input: DesignGenerationInput,
   instruction: string,
   count = 2,
+  sourceSvg?: string,
+  referenceImages?: string[],
   signal?: AbortSignal
 ): Promise<{ svg: string; label: string; clarificationQuestion?: string }[]> {
   if (!getApiConfig()) return [];
@@ -681,6 +685,8 @@ export async function editDesigns(
     ...input,
     data: parsed.updatedData,
     editNote: parsed.editSummary,
+    sourceSvg,
+    referenceImages,
   };
 
   return generateDesigns(updatedInput, count, signal);
@@ -689,15 +695,33 @@ export async function editDesigns(
 async function generateOneSvg(input: DesignGenerationInput, variantIndex: number): Promise<string | null> {
   if (!getApiConfig()) return null;
 
-  const system = `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster. Balanced, readable, high contrast, professional.`;
+  const isEdit = Boolean(input.sourceSvg && input.editNote);
 
-  const userPrompt = buildDesignPrompt(input);
+  const system = isEdit
+    ? `You are an expert SVG editor. The user wants to modify an existing SVG. Apply ONLY the requested change. Preserve the same viewBox, color palette, fonts, layout, and all elements that are not mentioned in the instruction. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Balanced, readable, high contrast, professional.`
+    : `You are an expert SVG designer. Output one raw SVG 1.1. No markdown, no comments, no explanation. Use only sans-serif, serif or monospace. All text inside viewBox. Flat vector, no raster. Balanced, readable, high contrast, professional.`;
+
+  const basePrompt = buildDesignPrompt(input);
+  const userPrompt = isEdit
+    ? `${basePrompt}\n\nCURRENT SVG TO EDIT:\n${input.sourceSvg}\n\nApply this change and return the full updated SVG only: ${input.editNote}`
+    : basePrompt;
 
   async function attempt(): Promise<string | null> {
     let text: string | null = null;
-    if (process.env.USE_IMAGE_PROMPT === "true") {
+    const refs = input.referenceImages || [];
+    if (process.env.USE_IMAGE_PROMPT === "true" && !input.sourceSvg) {
       const imageUrl = await promptToPngDataUrl(userPrompt, input.viewBox);
-      text = await callChatCompletion(system, [{ type: "image_url", image_url: { url: imageUrl } }], 12000);
+      const content: ChatContentPart[] = [{ type: "image_url", image_url: { url: imageUrl } }];
+      if (refs.length) {
+        content.push(...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })));
+      }
+      text = await callChatCompletion(system, content, 12000);
+    } else if (refs.length) {
+      const content: ChatContentPart[] = [
+        { type: "text", text: userPrompt },
+        ...refs.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+      ];
+      text = await callChatCompletion(system, content, 12000);
     } else {
       text = await callChatCompletion(system, userPrompt, 12000);
     }

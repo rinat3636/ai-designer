@@ -62,6 +62,7 @@ export function CreateWizard({
   const [selectedResultImage, setSelectedResultImage] = useState<GenerationImage | null>(null);
   const [editMessages, setEditMessages] = useState<ChatMessage[]>([]);
   const [editInput, setEditInput] = useState("");
+  const [editImages, setEditImages] = useState<string[]>([]);
   const [isFavorite, setIsFavorite] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<"svg" | "png" | "jpg">("png");
   const [downloadWidth, setDownloadWidth] = useState<string>("");
@@ -121,6 +122,7 @@ export function CreateWizard({
       setIsFavorite(generation.isFavorite || false);
       setEditMessages([]);
       setEditInput("");
+      setEditImages([]);
     }
   }, [generation]);
 
@@ -192,7 +194,7 @@ export function CreateWizard({
     const url = await uploadFile(file);
     if (url) {
       if (mode === "result") {
-        setEditInput((prev) => (prev ? prev + " " : "") + url);
+        setEditImages((prev) => [...prev, url]);
       } else {
         setSelectedImages((prev) => [...prev, url]);
       }
@@ -293,10 +295,13 @@ export function CreateWizard({
 
   async function sendEditInstruction(instruction: string, addToChat = true) {
     if (!generation || !selectedResultImage) return;
+    const images = editImages;
     if (addToChat) {
-      setEditMessages((prev) => [...prev, { role: "user", content: instruction }]);
+      const content = [instruction, ...images].filter(Boolean).join("\n");
+      setEditMessages((prev) => [...prev, { role: "user", content }]);
     }
     setEditInput("");
+    setEditImages([]);
     setLoading(true);
     setError("");
 
@@ -307,6 +312,7 @@ export function CreateWizard({
         body: JSON.stringify({
           instruction,
           selectedImageUrl: selectedResultImage.url,
+          referenceImageUrls: images,
           count: 2,
         }),
       });
@@ -334,7 +340,7 @@ export function CreateWizard({
 
   function sendEdit() {
     const text = editInput.trim();
-    if (!text) return;
+    if (!text && editImages.length === 0) return;
     sendEditInstruction(text, true);
   }
 
@@ -453,6 +459,8 @@ export function CreateWizard({
   const activeMessages = isResult ? editMessages : messages;
   const activeInput = isResult ? editInput : inputText;
   const setActiveInput = isResult ? setEditInput : setInputText;
+  const activeImages = isResult ? editImages : selectedImages;
+  const setActiveImages = isResult ? setEditImages : setSelectedImages;
   const activeSend = isResult ? sendEdit : sendMessage;
   const inputPlaceholder =
     mode === "select"
@@ -483,7 +491,7 @@ export function CreateWizard({
     const url = await uploadFile(file);
     if (url) {
       if (mode === "result") {
-        setEditInput((prev) => (prev ? prev + " " : "") + url);
+        setEditImages((prev) => [...prev, url]);
       } else {
         setSelectedImages((prev) => [...prev, url]);
       }
@@ -546,14 +554,14 @@ export function CreateWizard({
         </div>
 
         <div className="space-y-2 border-t p-3">
-          {!isResult && selectedImages.length > 0 && (
+          {activeImages.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {selectedImages.map((url) => (
+              {activeImages.map((url) => (
                 <div key={url} className="relative">
                   <img src={url} alt="Референс" className="h-14 w-14 rounded-lg border object-cover" />
                   <button
                     type="button"
-                    onClick={() => setSelectedImages((prev) => prev.filter((u) => u !== url))}
+                    onClick={() => setActiveImages((prev) => prev.filter((u) => u !== url))}
                     className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-destructive text-xs text-white"
                   >
                     ×
@@ -591,7 +599,7 @@ export function CreateWizard({
             />
             <Button
               type="button"
-              disabled={mode === "select" || loading || !activeInput.trim()}
+              disabled={mode === "select" || loading || (!activeInput.trim() && activeImages.length === 0)}
               onClick={activeSend}
             >
               <Send className="mr-1 size-4" />

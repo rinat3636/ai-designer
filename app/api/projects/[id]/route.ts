@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { editDesigns, type Brief, type Concept, type DesignGenerationInput } from "@/lib/llm";
 import { getViewBoxForTemplate } from "@/lib/design";
 import { saveSvg, removeGenerationFiles } from "@/lib/storage";
+import fs from "fs";
+import path from "path";
 
 export async function GET(
   _request: NextRequest,
@@ -57,7 +59,12 @@ export async function POST(
 
   const { id } = await params;
   const body = await request.json();
-  const { instruction, selectedImageUrl, count = 2 } = body;
+  const {
+    instruction,
+    selectedImageUrl,
+    referenceImageUrls = [],
+    count = 2,
+  } = body;
 
   if (!instruction) {
     return NextResponse.json({ error: "Missing instruction" }, { status: 400 });
@@ -71,6 +78,32 @@ export async function POST(
 
   const sourceUrl =
     selectedImageUrl || generation.images.find((i) => i.isSelected)?.url || generation.images[0]?.url;
+
+  const refs = Array.isArray(referenceImageUrls) ? (referenceImageUrls as string[]) : [];
+  const allSourceUrls = sourceUrl ? [sourceUrl, ...refs] : refs;
+
+  function readLocalSvg(url: string): string | null {
+    if (!url || (!url.startsWith("/generated/") && !url.startsWith("/uploads/"))) return null;
+    try {
+      const filePath = path.join(process.cwd(), "public", url);
+      const content = fs.readFileSync(filePath, "utf-8");
+      return content.includes("<svg") ? content : null;
+    } catch (e) {
+      console.error("Failed to read local SVG", url, e);
+      return null;
+    }
+  }
+
+  let sourceSvg = "";
+  for (const url of allSourceUrls) {
+    const svg = readLocalSvg(url);
+    if (svg) {
+      sourceSvg = svg;
+      break;
+    }
+  }
+
+  const referenceImages = refs.filter((url) => !readLocalSvg(url));
 
   const brief = (generation.brief || {}) as Brief;
   const concept = (generation.concept || {}) as Concept;
@@ -107,7 +140,9 @@ export async function POST(
     const designs = await editDesigns(
       input,
       instruction,
-      Math.max(1, Math.min(2, Number(count) || 2))
+      Math.max(1, Math.min(2, Number(count) || 2)),
+      sourceSvg,
+      referenceImages
     );
 
     const clarification = designs.find((d) => d.clarificationQuestion);
