@@ -15,6 +15,7 @@ export type Brand = BrandSettings;
 export type Concept = {
   name: string;
   description: string;
+  explanation?: string;
   palette: string[];
   recommendations: string[];
 };

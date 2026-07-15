@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 import { generateConcepts, type Brief } from "@/lib/llm";
 
 export async function POST(request: NextRequest) {
@@ -15,8 +16,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Brief is incomplete" }, { status: 400 });
     }
 
-    const concepts = await generateConcepts(brief);
-    return NextResponse.json({ concepts });
+    let template = null;
+    if (body.templateId) {
+      template = await prisma.template.findUnique({ where: { id: body.templateId } });
+    }
+
+    const result = await generateConcepts(brief, template);
+    return NextResponse.json(result);
   } catch (error) {
     console.error("Concepts API error", error);
     return NextResponse.json({ error: "Failed to generate concepts" }, { status: 500 });

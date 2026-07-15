@@ -1,52 +1,117 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import * as Icons from "lucide-react";
-import { ArrowLeft, ArrowRight, Wand2, Sparkles, FileImage } from "lucide-react";
-import { ResultGallery } from "./result-gallery";
+import {
+  ArrowLeft,
+  Wand2,
+  Sparkles,
+  FileImage,
+  Paperclip,
+  Send,
+  Download,
+  RefreshCw,
+  Plus,
+  Heart,
+  Trash2,
+  MessageSquare,
+  Upload,
+} from "lucide-react";
 import type { Template, Brand, Generation, Concept, Brief } from "@/types";
+import type { GenerationImage } from "@prisma/client";
+import { downloadSvg, downloadRaster, getViewBoxSize } from "@/lib/client-image";
+import { getViewBoxForTemplate } from "@/lib/design";
 
-type FieldDef = { name: string; label: string; type: string; required?: boolean };
+const EDIT_KEYWORDS =
+  /(сделай|сделайте|измени|измените|поменяй|поменяйте|замени|замените|добавь|добавьте|убери|удали|передвинь|сдвинь|переделай|переделайте|обнови|обновите|отредактируй|отредактируйте|исправь|исправьте|уменьш|увелич|крупнее|меньше|ярче|темнее|светлее|контраст|насыщ|размер|шрифт|текст|цвет|фон|background|change|make|edit|red|blue|green|yellow|black|white|красн|син|зел[её]н|желт|черн|бел|оранж|розов|фиолет|коричн|сер|голуб|бирюз)/i;
+
+function looksLikeEdit(text: string, hasImages: boolean): boolean {
+  if (!text || !hasImages) return false;
+  return EDIT_KEYWORDS.test(text);
+}
+
+function extractSize(text: string): string {
+  const match = text.match(/(\d{2,4})\s?[x×]\s?(\d{2,4})/i);
+  return match ? `${match[1]}x${match[2]}` : "";
+}
+
+const UPLOAD_TEMPLATE_ID = "upload";
+const UPLOAD_TEMPLATE: Template = {
+  id: UPLOAD_TEMPLATE_ID,
+  slug: "custom-upload",
+  category: "Редактор",
+  categoryKey: "editor",
+  name: "Редактировать свой макет",
+  description: "Загрузите готовый логотип, сертификат или другой макет, и ИИ внесёт правки, сохранив оригинал.",
+  icon: "Upload",
+  fields: [],
+  promptHints: {},
+  isActive: true,
+  displayOrder: -1,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+} as unknown as Template;
+
+type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string | ChatContentPart[];
+};
+
+type WizardMode = "select" | "upload-edit" | "interview" | "concepts" | "generating" | "result";
 
 export function CreateWizard({
   templates,
-  brand,
 }: {
   templates: Template[];
   brand: Brand | null;
 }) {
-  const [step, setStep] = useState(0);
+  const [mode, setMode] = useState<WizardMode>("select");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
-  const [brief, setBrief] = useState<Brief>(() => ({
-    companyName: brand?.companyName || "",
-    businessDesc: brand?.businessDesc || "",
-    website: brand?.website || "",
-    targetAudience: brand?.targetAudience || "",
-    style: brand?.style || "",
-    colors: Array.isArray(brand?.colors) ? (brand?.colors as string[]) : undefined,
-    logoUrl: brand?.logoUrl || "",
-  }));
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [currentData, setCurrentData] = useState<Record<string, any>>({});
+  const [inputText, setInputText] = useState("");
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [concepts, setConcepts] = useState<Concept[]>([]);
+  const [analysis, setAnalysis] = useState<string>("");
   const [selectedConcept, setSelectedConcept] = useState<Concept | null>(null);
-  const [data, setData] = useState<Record<string, string>>({});
   const [generation, setGeneration] = useState<Generation | null>(null);
+  const [resultImages, setResultImages] = useState<GenerationImage[]>([]);
+  const [selectedResultImage, setSelectedResultImage] = useState<GenerationImage | null>(null);
+  const [editMessages, setEditMessages] = useState<ChatMessage[]>([]);
+  const [editInput, setEditInput] = useState("");
+  const [editImages, setEditImages] = useState<string[]>([]);
+  const [isFavorite, setIsFavorite] = useState(false);
+  const [downloadFormat, setDownloadFormat] = useState<"svg" | "png" | "jpg">("png");
+  const [downloadWidth, setDownloadWidth] = useState<string>("");
+  const [downloadHeight, setDownloadHeight] = useState<string>("");
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
+  const [dragOver, setDragOver] = useState(false);
 
-  const template = useMemo(
-    () => templates.find((t) => t.id === selectedTemplateId) || null,
-    [selectedTemplateId, templates]
-  );
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+
+  const template = useMemo(() => {
+    if (selectedTemplateId === UPLOAD_TEMPLATE_ID) return UPLOAD_TEMPLATE;
+    return templates.find((t) => t.id === selectedTemplateId) || null;
+  }, [selectedTemplateId, templates]);
 
   const categories = useMemo(() => {
     const map = new Map<string, Template[]>();
@@ -58,72 +123,267 @@ export function CreateWizard({
     return map;
   }, [templates]);
 
-  const fields = useMemo<FieldDef[]>(() => {
-    if (!template) return [];
-    const f = template.fields as any;
-    if (Array.isArray(f)) return f;
-    return [];
-  }, [template]);
-
-  async function generateConcepts() {
-    setLoading(true);
-    setError("");
-    try {
-      const res = await fetch("/api/concepts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brief }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error);
-      setConcepts(json.concepts || []);
-    } catch (e: any) {
-      setError(e.message || "Ошибка генерации концепций");
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    if (selectedTemplateId && mode === "select") {
+      setMessages([]);
+      setCurrentData({});
+      setInputText("");
+      setSelectedImages([]);
+      setEditMessages([]);
+      setEditInput("");
+      if (selectedTemplateId === UPLOAD_TEMPLATE_ID) {
+        setMode("upload-edit");
+      } else {
+        setMode("interview");
+      }
     }
-  }
+  }, [selectedTemplateId, mode]);
 
   useEffect(() => {
-    if (step === 2) {
-      generateConcepts();
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [messages, editMessages, loading]);
+
+  useEffect(() => {
+    if (selectedConcept && mode === "concepts") {
+      generate();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [selectedConcept, mode]);
+
+  useEffect(() => {
+    if (generation) {
+      setResultImages(generation.images || []);
+      setSelectedResultImage(generation.images?.[0] || null);
+      setIsFavorite(generation.isFavorite || false);
+      setEditMessages([]);
+      setEditInput("");
+      setEditImages([]);
+    }
+  }, [generation]);
+
+  useEffect(() => {
+    if (!selectedResultImage || !generation?.template?.slug) return;
+    const baseViewBox = getViewBoxForTemplate(generation.template.slug);
+    const baseSize = getViewBoxSize(`<svg viewBox="${baseViewBox}"/>`);
+    setDownloadWidth(String(baseSize?.width || 1024));
+    setDownloadHeight(String(baseSize?.height || 1024));
+
+    fetch(selectedResultImage.url)
+      .then((r) => r.text())
+      .then((svg) => {
+        const size = getViewBoxSize(svg);
+        if (size) {
+          setDownloadWidth(String(size.width));
+          setDownloadHeight(String(size.height));
+        }
+      })
+      .catch(() => {});
+  }, [selectedResultImage, generation?.template?.slug]);
 
   function iconFor(name?: string) {
     const Icon = name ? (Icons as any)[name] || FileImage : FileImage;
     return Icon ? <Icon className="size-6" /> : <FileImage className="size-6" />;
   }
 
-  function brandDefault(name: string) {
-    if (name === "companyName" || name === "headline") return brand?.companyName || brief.companyName || "";
-    if (name === "website") return brand?.website || brief.website || "";
-    if (name === "phone") return brand?.phone || "";
-    if (name === "telegram") return brand?.telegram || "";
-    if (name === "email") return brand?.email || "";
-    if (name === "address") return brand?.address || "";
-    if (name === "buttonText") return "Подробнее";
-    if (name === "discount") return "";
-    if (name === "subheadline" || name === "productDesc" || name === "features") return brief.businessDesc || "";
-    if (name === "productName") return brief.companyName || "";
-    if (name === "price" || name === "oldPrice") return "";
-    if (name === "style") return brief.style || "";
-    return "";
+  function buildBrief(): Brief {
+    const colors = Array.isArray(currentData.colors)
+      ? currentData.colors
+      : typeof currentData.colors === "string"
+      ? currentData.colors
+          .split(/[,;]/)
+          .map((c: string) => c.trim())
+          .filter(Boolean)
+      : [];
+    return {
+      businessDesc: currentData.businessDesc || "",
+      companyName: currentData.companyName || "",
+      website: currentData.website || "",
+      targetAudience: currentData.targetAudience || "",
+      style: currentData.style || "",
+      colors,
+      logoUrl: currentData.logoUrl || currentData.referenceImages?.[0] || "",
+    };
   }
 
-  function computeDataDefaults() {
-    const defaults: Record<string, string> = {};
-    for (const f of fields) {
-      defaults[f.name] = brandDefault(f.name);
+  async function uploadFile(file: File): Promise<{ url: string; width: number; height: number } | null> {
+    setUploading(true);
+    setError("");
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+      return { url: json.url, width: json.width || 0, height: json.height || 0 };
+    } catch (e: any) {
+      setError(e.message || "Ошибка загрузки файла");
+      return null;
+    } finally {
+      setUploading(false);
     }
-    return defaults;
   }
 
-  async function generate(finalData: Record<string, string>) {
-    if (!template || !selectedConcept) return;
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const result = await uploadFile(file);
+    if (result) {
+      const { url, width, height } = result;
+      if (width > 0 && height > 0) {
+        setCurrentData((prev) => ({ ...prev, size: `${width}x${height}` }));
+      }
+      if (mode === "result") {
+        setEditImages((prev) => [...prev, url]);
+      } else {
+        setSelectedImages((prev) => [...prev, url]);
+      }
+    }
+    e.target.value = "";
+  }
+
+  async function sendMessage() {
+    const text = inputText.trim();
+
+    // On the first screen, resolve the template from free-form text:
+    // "сделай Stories для кофейни" selects the right template automatically.
+    if (mode === "select") {
+      if (!text) return;
+      setLoading(true);
+      setError("");
+      try {
+        const res = await fetch("/api/resolve-template", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text }),
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error);
+        const resolved = templates.find((t) => t.id === json.templateId);
+        if (!resolved) {
+          setError("Не удалось определить тип дизайна. Выберите его из списка или опишите точнее.");
+          return;
+        }
+
+        const nextData: Record<string, any> = json.size
+          ? { size: json.size, data: { size: json.size } }
+          : {};
+        const userMessage: ChatMessage = { role: "user", content: text };
+        setSelectedTemplateId(resolved.id);
+        setMode("interview");
+        setCurrentData(nextData);
+        setMessages([userMessage]);
+        setInputText("");
+
+        const interviewRes = await fetch("/api/interview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            templateId: resolved.id,
+            messages: [userMessage],
+            currentData: nextData,
+          }),
+        });
+        const interviewJson = await interviewRes.json();
+        if (!interviewRes.ok) throw new Error(interviewJson.error);
+
+        setCurrentData((prev) => ({ ...prev, ...(interviewJson.extractedData || {}) }));
+        setMessages((prev) => [...prev, { role: "assistant", content: interviewJson.message }]);
+        if (interviewJson.done) {
+          setAnalysis(interviewJson.analysis || "");
+          setConcepts(interviewJson.concepts || []);
+          setMode("concepts");
+        }
+      } catch (e: any) {
+        setError(e.message || "Ошибка определения шаблона");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if ((!text && selectedImages.length === 0) || !template) return;
+
+    // In the upload-edit mode, always edit the uploaded image directly.
+    if (mode === "upload-edit" && selectedImages.length > 0) {
+      const instruction = text || "Сохрани макет и примени небольшие улучшения";
+      const editContent: ChatContentPart[] = [
+        { type: "text", text: instruction },
+        ...selectedImages.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+      ];
+      setMessages((prev) => [...prev, { role: "user", content: editContent }]);
+      return generateFromImage(instruction, selectedImages);
+    }
+
+    // If the user uploaded an image and the message looks like an edit request,
+    // bypass the interview and generate a new SVG based on the uploaded design.
+    if (looksLikeEdit(text, selectedImages.length > 0)) {
+      const editContent: ChatContentPart[] = [
+        { type: "text", text },
+        ...selectedImages.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+      ];
+      setMessages((prev) => [...prev, { role: "user", content: editContent }]);
+      return generateFromImage(text, selectedImages);
+    }
+
+    const content: string | ChatContentPart[] =
+      selectedImages.length > 0
+        ? [
+            { type: "text" as const, text: text || "Вот референс(ы):" },
+            ...selectedImages.map((url) => ({
+              type: "image_url" as const,
+              image_url: { url },
+            })),
+          ]
+        : text;
+
+    const userMessage: ChatMessage = { role: "user", content };
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
+    setInputText("");
+    setSelectedImages([]);
     setLoading(true);
     setError("");
+
+    try {
+      const res = await fetch("/api/interview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateId: template.id,
+          messages: newMessages,
+          currentData,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+
+      setCurrentData((prev) => ({ ...prev, ...(json.extractedData || {}) }));
+      setMessages((prev) => [...prev, { role: "assistant", content: json.message }]);
+
+      if (json.done) {
+        setAnalysis(json.analysis || "");
+        setConcepts(json.concepts || []);
+        setMode("concepts");
+      }
+    } catch (e: any) {
+      setError(e.message || "Ошибка интервью");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function generate() {
+    if (!template || !selectedConcept) return;
+
+    const brief = buildBrief();
+    const data = (currentData.data || {}) as Record<string, string>;
+
+    setLoading(true);
+    setError("");
+    setMode("generating");
+
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -132,8 +392,8 @@ export function CreateWizard({
           templateId: template.id,
           brief,
           concept: selectedConcept,
-          data: finalData,
-          count: 4,
+          data,
+          count: 1,
         }),
       });
       const json = await res.json();
@@ -144,166 +404,752 @@ export function CreateWizard({
         throw new Error(json.error);
       }
       setGeneration(json.generation);
-      setStep(5);
+      setMode("result");
       toast.success("Макеты готовы!");
     } catch (e: any) {
       setError(e.message || "Ошибка генерации");
+      setMode("concepts");
     } finally {
       setLoading(false);
     }
   }
 
+  async function generateFromImage(editInstruction: string, images: string[]) {
+    if (!template) return;
+
+    const brief: Brief = {
+      businessDesc: currentData.businessDesc || "Загруженный пользователем макет",
+      companyName: currentData.companyName || "",
+      website: currentData.website || "",
+      targetAudience: currentData.targetAudience || "",
+      style: currentData.style || "",
+      colors: Array.isArray(currentData.colors) ? currentData.colors : [],
+      logoUrl: images[0] || "",
+    };
+
+    // Leave size empty unless explicitly requested so the server can keep
+    // the uploaded image's original dimensions.
+    const size = extractSize(editInstruction) || currentData.size || "";
+    const data: Record<string, string> = {
+      ...(currentData.data || {}),
+      size,
+      editInstruction,
+    };
+
+    const concept: Concept = {
+      name: "На основе загруженного макета",
+      description: "Сгенерировать SVG на основе загруженного изображения с учётом правки пользователя",
+      explanation: "ИИ повторяет загруженный макет и применяет запрошенное изменение.",
+      palette: brief.colors?.length ? brief.colors : ["#2563eb", "#f8fafc", "#0f172a"],
+      recommendations: ["Сохранить композицию и текст с загруженного изображения", "Применить только запрошенное изменение"],
+    };
+
+    setInputText("");
+    setSelectedImages([]);
+    setLoading(true);
+    setError("");
+    setMode("generating");
+
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateId: template.id,
+          brief,
+          concept,
+          data,
+          referenceImageUrls: images,
+          editNote: editInstruction,
+          count: 1,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        if (res.status === 403) {
+          toast.error(json.error || "Лимит генераций исчерпан. Перейдите на другой тариф.");
+        }
+        throw new Error(json.error);
+      }
+      setGeneration(json.generation);
+      setMode("result");
+      toast.success("Макет на основе изображения готов!");
+    } catch (e: any) {
+      setError(e.message || "Ошибка генерации по изображению");
+      setMode(mode === "upload-edit" ? "upload-edit" : "interview");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function sendEditInstruction(instruction: string, addToChat = true) {
+    if (!generation || !selectedResultImage) return;
+    const images = editImages;
+    const userContent = [instruction, ...images].filter(Boolean).join("\n");
+    const nextMessages: ChatMessage[] = addToChat
+      ? [...editMessages, { role: "user", content: userContent }]
+      : editMessages;
+    if (addToChat) {
+      setEditMessages(nextMessages);
+    }
+    setEditInput("");
+    setEditImages([]);
+    setLoading(true);
+    setError("");
+
+    try {
+      const res = await fetch(`/api/projects/${generation.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction,
+          selectedImageUrl: selectedResultImage.url,
+          referenceImageUrls: images,
+          messages: nextMessages,
+          count: 2,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+
+      if (json.clarificationQuestion) {
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.clarificationQuestion }]);
+      } else {
+        const newImages = (json.images || []) as GenerationImage[];
+        if (newImages.length > 0) {
+          setResultImages((prev) => [...prev, ...newImages]);
+          setSelectedResultImage(newImages[0]);
+          toast("Варианты отредактированы");
+        }
+        setEditMessages((prev) => [...prev, { role: "assistant", content: "Готово. Новые варианты добавлены." }]);
+      }
+    } catch (e: any) {
+      setError(e.message || "Не удалось отредактировать");
+      setEditMessages((prev) => [...prev, { role: "assistant", content: "Ошибка: " + (e.message || "повторите позже") }]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function sendEdit() {
+    const text = editInput.trim();
+    if (!text && editImages.length === 0) return;
+    sendEditInstruction(text, true);
+  }
+
+  async function handleDownload() {
+    if (!selectedResultImage || !generation) return;
+    const name = `design-${generation.title || generation.template?.name || generation.id}`;
+    try {
+      if (downloadFormat === "svg") {
+        await downloadSvg(selectedResultImage.url, `${name}.svg`);
+      } else {
+        const w = Number(downloadWidth) || undefined;
+        const h = Number(downloadHeight) || undefined;
+        const mime = downloadFormat === "png" ? "image/png" : "image/jpeg";
+        await downloadRaster(selectedResultImage.url, `${name}.${downloadFormat}`, mime, w, h);
+      }
+      toast("Скачивание началось");
+    } catch {
+      toast.error("Не удалось скачать");
+    }
+  }
+
+  function applyPreset(preset: string) {
+    const parts = preset.split("x");
+    if (parts.length === 2) {
+      setDownloadWidth(parts[0]);
+      setDownloadHeight(parts[1]);
+    }
+  }
+
+  function handleRegenerate() {
+    if (!template || !selectedConcept) return;
+    generate();
+  }
+
+  function handleCreateSimilar() {
+    sendEditInstruction("Сделай похожий вариант с небольшими отличиями", true);
+  }
+
+  function handleEditFocus() {
+    chatInputRef.current?.focus();
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
+  }
+
+  async function toggleFavorite() {
+    if (!generation) return;
+    const next = !isFavorite;
+    setIsFavorite(next);
+    await fetch(`/api/projects/${generation.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isFavorite: next }),
+    });
+    toast(next ? "Добавлено в избранное" : "Убрано из избранного");
+  }
+
+  async function deleteGeneration() {
+    if (!generation) return;
+    const ok = confirm("Удалить генерацию?");
+    if (!ok) return;
+    await fetch(`/api/projects/${generation.id}`, { method: "DELETE" });
+    restart();
+  }
+
   function restart() {
-    setStep(0);
+    setMode("select");
     setSelectedTemplateId("");
+    setMessages([]);
+    setCurrentData({});
+    setInputText("");
+    setSelectedImages([]);
     setConcepts([]);
+    setAnalysis("");
     setSelectedConcept(null);
-    setData({});
     setGeneration(null);
+    setResultImages([]);
+    setSelectedResultImage(null);
+    setEditMessages([]);
+    setEditInput("");
     setError("");
   }
 
-  function nextDisabled() {
-    if (step === 0) return !template;
-    if (step === 1) return !brief.companyName || !brief.businessDesc;
-    if (step === 2) return !selectedConcept;
-    if (step === 3) {
-      return fields.some((f) => f.required && !data[f.name]);
+  function handleBack() {
+    if (mode === "interview" || mode === "upload-edit") {
+      setMode("select");
+      setMessages([]);
+      setCurrentData({});
+      setInputText("");
+      setSelectedImages([]);
+    } else if (mode === "concepts") {
+      setMode("interview");
+    } else if (mode === "result") {
+      restart();
     }
-    return false;
   }
 
-  function handleNext() {
-    if (step === 0 && template) {
-      setData(computeDataDefaults());
+  function renderMessageContent(content: string | ChatContentPart[]) {
+    if (typeof content === "string") {
+      return <p className="whitespace-pre-wrap text-sm leading-relaxed">{content}</p>;
     }
-    if (step === 3) {
-      const finalData = { ...computeDataDefaults(), ...data };
-      setData(finalData);
-      setStep(4);
-      generate(finalData);
-      return;
-    }
-    setStep(step + 1);
+    return (
+      <div className="space-y-2">
+        {content.map((part, i) =>
+          part.type === "text" ? (
+            <p key={i} className="whitespace-pre-wrap text-sm leading-relaxed">
+              {part.text}
+            </p>
+          ) : (
+            <img
+              key={i}
+              src={part.image_url.url}
+              alt="Референс"
+              className="max-h-40 rounded-lg border object-cover"
+            />
+          )
+        )}
+      </div>
+    );
   }
 
-  function renderStep() {
-    switch (step) {
-      case 0:
-        return (
-          <div className="space-y-6">
-            <div className="text-center">
-              <h1 className="text-2xl font-semibold">Выберите тип дизайна</h1>
-              <p className="text-muted-foreground">Выберите шаблон, который ближе всего к вашей задаче</p>
+  const isResult = mode === "result";
+  const activeMessages = isResult ? editMessages : messages;
+  const activeInput = isResult ? editInput : inputText;
+  const setActiveInput = isResult ? setEditInput : setInputText;
+  const activeImages = isResult ? editImages : selectedImages;
+  const setActiveImages = isResult ? setEditImages : setSelectedImages;
+  const activeSend = isResult ? sendEdit : sendMessage;
+  const inputPlaceholder =
+    mode === "select"
+      ? "Опишите, что нужно, например: «Сделай Stories для кофейни»…"
+      : mode === "upload-edit"
+      ? "Загрузите макет и напишите правку, например: «Сделай фон красным»…"
+      : isResult
+      ? "Напишите правку, например: «Сделай фон темнее»…"
+      : "Ваш ответ…";
+
+  function handleChatKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      activeSend();
+    }
+  }
+
+  function onDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(true);
+  }
+  function onDragLeave() {
+    setDragOver(false);
+  }
+  async function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    const result = await uploadFile(file);
+    if (result) {
+      const { url, width, height } = result;
+      if (width > 0 && height > 0) {
+        setCurrentData((prev) => ({ ...prev, size: `${width}x${height}` }));
+      }
+      if (mode === "result") {
+        setEditImages((prev) => [...prev, url]);
+      } else {
+        setSelectedImages((prev) => [...prev, url]);
+      }
+    }
+  }
+
+  function ChatPanel() {
+    return (
+      <div
+        className={`relative flex h-full min-h-0 flex-col rounded-xl border bg-card shadow-sm transition-colors ${
+          dragOver ? "border-primary ring-2 ring-primary/20" : ""
+        }`}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {dragOver && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-primary/10">
+            <p className="text-sm font-medium text-primary">Отпустите файл для загрузки</p>
+          </div>
+        )}
+        <div className="flex items-center justify-between border-b p-3">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="size-4 text-primary" />
+            <h3 className="font-medium">{isResult ? "Правки" : mode === "upload-edit" ? "Редактор макета" : "Чат с ИИ-дизайнером"}</h3>
+          </div>
+          {template && !isResult && <span className="text-xs text-muted-foreground">{template.name}</span>}
+        </div>
+
+        <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
+          {activeMessages.length === 0 && mode === "select" && (
+            <div className="text-center text-sm text-muted-foreground">
+              Напишите, что нужно, например: «Сделай Stories 1080x1920 для кофейни» — и я сам подберу шаблон. Или выберите тип дизайна справа.
             </div>
-            <div className="space-y-8">
-              {Array.from(categories.entries()).map(([catKey, items]) => (
-                <div key={catKey}>
-                  <h2 className="mb-3 text-lg font-medium">{items[0]?.category}</h2>
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    {items.map((t) => (
-                      <Card
-                        key={t.id}
-                        onClick={() => setSelectedTemplateId(t.id)}
-                        className={`cursor-pointer transition hover:border-primary ${
-                          selectedTemplateId === t.id ? "ring-2 ring-primary" : ""
-                        }`}
-                      >
-                        <CardContent className="flex items-start gap-4 pt-6">
-                          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                            {iconFor(t.icon || undefined)}
-                          </div>
-                          <div>
-                            <CardTitle>{t.name}</CardTitle>
-                            <CardDescription>{t.description}</CardDescription>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    ))}
-                  </div>
+          )}
+          {activeMessages.length === 0 && mode === "upload-edit" && (
+            <div className="text-center text-sm text-muted-foreground">
+              Загрузите макет (логотип, сертификат и т.д.) и напишите, что изменить, например: «Сделай фон красным».
+            </div>
+          )}
+          {activeMessages.length === 0 && mode === "interview" && (
+            <div className="text-center text-sm text-muted-foreground">
+              Напишите первое сообщение, например: «Нужен логотип для кофейни в стиле минимализма».
+            </div>
+          )}
+          {activeMessages.length === 0 && isResult && (
+            <div className="text-center text-sm text-muted-foreground">
+              Макеты готовы. Пишите, что хотите изменить, например: «Передвинь логотип выше».
+            </div>
+          )}
+          {activeMessages.map((m, i) => (
+            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                className={`max-w-[90%] rounded-xl px-3 py-2 text-sm ${
+                  m.role === "user"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-foreground"
+                }`}
+              >
+                {renderMessageContent(m.content)}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Wand2 className="size-4 animate-pulse" />
+              {isResult ? "ИИ редактирует…" : mode === "upload-edit" ? "ИИ редактирует макет…" : "ИИ печатает…"}
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-2 border-t p-3">
+          {activeImages.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {activeImages.map((url) => (
+                <div key={url} className="relative">
+                  <img src={url} alt="Референс" className="h-16 w-16 rounded-lg border object-cover md:h-14 md:w-14" />
+                  <button
+                    type="button"
+                    onClick={() => setActiveImages((prev) => prev.filter((u) => u !== url))}
+                    className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-destructive text-xs text-white"
+                  >
+                    ×
+                  </button>
                 </div>
               ))}
             </div>
+          )}
+          <div className="flex gap-2">
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              disabled={uploading || mode === "select"}
+              onClick={() => fileInputRef.current?.click()}
+              title="Прикрепить файл"
+              className="h-11 w-11 shrink-0 md:h-10 md:w-10"
+            >
+              <Paperclip className="size-5 md:size-4" />
+            </Button>
+            <Textarea
+              ref={chatInputRef}
+              value={activeInput}
+              onChange={(e) => setActiveInput(e.target.value)}
+              placeholder={inputPlaceholder}
+              rows={1}
+              className="min-h-[44px] flex-1 resize-none text-base md:text-sm"
+              onKeyDown={handleChatKeyDown}
+              disabled={loading}
+            />
+            <Button
+              type="button"
+              disabled={loading || (!activeInput.trim() && activeImages.length === 0)}
+              onClick={activeSend}
+              className="h-11 shrink-0 px-4 text-base md:h-10 md:px-3 md:text-sm"
+            >
+              <Send className="mr-1 size-5 md:size-4" />
+              <span className="hidden sm:inline">Отправить</span>
+              <span className="sm:hidden">OK</span>
+            </Button>
           </div>
-        );
+        </div>
+      </div>
+    );
+  }
 
-      case 1:
-        return (
-          <div className="mx-auto max-w-2xl space-y-6">
-            <div>
-              <h1 className="text-2xl font-semibold">Расскажите о бизнесе</h1>
-              <p className="text-muted-foreground">ИИ проанализирует нишу и предложит концепции</p>
-            </div>
-            <Card>
-              <CardContent className="space-y-4 pt-6">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="companyName">Название компании</Label>
-                    <Input id="companyName" value={brief.companyName} onChange={(e) => setBrief({ ...brief, companyName: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="website">Сайт</Label>
-                    <Input id="website" value={brief.website} onChange={(e) => setBrief({ ...brief, website: e.target.value })} />
-                  </div>
+  function TemplateSelection() {
+    return (
+      <div className="space-y-6 overflow-y-auto p-1">
+        <div className="text-center">
+          <h1 className="text-2xl font-semibold">Что хотите сделать?</h1>
+          <p className="text-muted-foreground">Редактируйте свой макет или создайте новый дизайн с помощью ИИ</p>
+        </div>
+        {!showTemplates ? (
+          <div className="mx-auto grid max-w-2xl gap-4">
+            <Card
+              onClick={() => setSelectedTemplateId(UPLOAD_TEMPLATE_ID)}
+              className={`cursor-pointer transition hover:border-primary ${
+                selectedTemplateId === UPLOAD_TEMPLATE_ID ? "ring-2 ring-primary" : ""
+              }`}
+            >
+              <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
+                <div className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Upload className="size-6" />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="businessDesc">Чем занимается компания?</Label>
-                  <Textarea
-                    id="businessDesc"
-                    value={brief.businessDesc}
-                    onChange={(e) => setBrief({ ...brief, businessDesc: e.target.value })}
-                    placeholder="Например, интернет-магазин дизайнерской мебели"
-                  />
+                <div>
+                  <CardTitle>Редактировать свой макет</CardTitle>
+                  <CardDescription>Загрузите логотип, сертификат или другой файл, и ИИ внесёт правки, сохранив оригинал.</CardDescription>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="targetAudience">Целевая аудитория</Label>
-                  <Input id="targetAudience" value={brief.targetAudience} onChange={(e) => setBrief({ ...brief, targetAudience: e.target.value })} />
+              </CardContent>
+            </Card>
+            <Card
+              onClick={() => setShowTemplates(true)}
+              className="cursor-pointer transition hover:border-primary"
+            >
+              <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
+                <div className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Wand2 className="size-6" />
                 </div>
-                <div className="space-y-2">
-                  <Label>Предпочитаемый стиль</Label>
-                  <Select value={brief.style || undefined} onValueChange={(v) => setBrief({ ...brief, style: v || undefined })}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Выберите стиль" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {["Минимализм", "Премиум", "Современный", "Яркий продающий", "Корпоративный"].map((s) => (
-                        <SelectItem key={s} value={s}>
-                          {s}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="colors">Фирменные цвета (через запятую)</Label>
-                  <Input
-                    id="colors"
-                    value={Array.isArray(brief.colors) ? brief.colors.join(", ") : ""}
-                    onChange={(e) =>
-                      setBrief({
-                        ...brief,
-                        colors: e.target.value.split(/[,;]/).map((c) => c.trim()).filter(Boolean),
-                      })
-                    }
-                    placeholder="#2563eb, #f8fafc"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="logoUrl">URL логотипа (опционально)</Label>
-                  <Input id="logoUrl" value={brief.logoUrl} onChange={(e) => setBrief({ ...brief, logoUrl: e.target.value })} placeholder="https://..." />
+                <div>
+                  <CardTitle>Сгенерировать новый дизайн</CardTitle>
+                  <CardDescription>Выберите тип дизайна или просто опишите задачу в чате — ИИ подберёт шаблон сам.</CardDescription>
                 </div>
               </CardContent>
             </Card>
           </div>
-        );
+        ) : (
+        <div className="space-y-8">
+          <Button variant="ghost" size="sm" onClick={() => setShowTemplates(false)}>
+            <ArrowLeft className="mr-1 size-4" /> Назад
+          </Button>
+          {Array.from(categories.entries()).map(([catKey, items]) => (
+            <div key={catKey}>
+              <h2 className="mb-3 text-lg font-medium">{items[0]?.category}</h2>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {items.map((t) => (
+                  <Card
+                    key={t.id}
+                    onClick={() => setSelectedTemplateId(t.id)}
+                    className={`cursor-pointer transition hover:border-primary ${
+                      selectedTemplateId === t.id ? "ring-2 ring-primary" : ""
+                    }`}
+                  >
+                    <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
+                      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                        {iconFor(t.icon || undefined)}
+                      </div>
+                      <div>
+                        <CardTitle>{t.name}</CardTitle>
+                        <CardDescription>{t.description}</CardDescription>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        )}
+      </div>
+    );
+  }
 
-      case 2:
-        if (loading) {
+  function InterviewPlaceholder() {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+        <MessageSquare className="size-12 text-muted-foreground" />
+        <h2 className="text-2xl font-semibold">Диалог с ИИ-дизайнером</h2>
+        <p className="max-w-md text-muted-foreground">
+          Отвечайте текстом или перетащите фото-референс в чат. ИИ задаст нужные вопросы и предложит концепции.
+        </p>
+      </div>
+    );
+  }
+
+  function UploadEditPlaceholder() {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+        <Upload className="size-12 text-muted-foreground" />
+        <h2 className="text-2xl font-semibold">Редактор макета</h2>
+        <p className="max-w-md text-muted-foreground">
+          Загрузите свой логотип, сертификат или другой макет в чат слева и напишите, что нужно изменить. ИИ сохранит оригинал и внесёт правку.
+        </p>
+      </div>
+    );
+  }
+
+  function ConceptsPanel() {
+    return (
+      <div className="space-y-6 overflow-y-auto p-1">
+        {analysis && (
+          <Card className="border-primary/20 bg-primary/5">
+            <CardHeader>
+              <CardTitle className="text-base">Анализ ниши</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm leading-relaxed">{analysis}</p>
+            </CardContent>
+          </Card>
+        )}
+        <div className="text-center">
+          <h1 className="text-2xl font-semibold">Выберите концепцию</h1>
+          <p className="text-muted-foreground">{concepts.length} вариантов на основе вашей ниши</p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {concepts.map((c) => (
+            <Card
+              key={c.name}
+              onClick={() => setSelectedConcept(c)}
+              className={`cursor-pointer transition hover:border-primary ${
+                selectedConcept?.name === c.name ? "ring-2 ring-primary" : ""
+              }`}
+            >
+              <CardHeader>
+                <CardTitle>{c.name}</CardTitle>
+                <CardDescription>{c.description}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {c.explanation && <p className="text-sm text-muted-foreground">{c.explanation}</p>}
+                <div className="flex gap-2">
+                  {c.palette.map((color) => (
+                    <span
+                      key={color}
+                      className="size-6 rounded-full border"
+                      style={{ backgroundColor: color }}
+                      title={color}
+                    />
+                  ))}
+                </div>
+                <ul className="space-y-1 text-sm text-muted-foreground">
+                  {c.recommendations.slice(0, 3).map((r, i) => (
+                    <li key={i}>• {r}</li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function GeneratingPanel() {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
+        <Sparkles className="size-12 animate-pulse text-primary" />
+        <div>
+          <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
+          <p className="text-muted-foreground">Это может занять до одной минуты</p>
+        </div>
+        <Progress value={50} className="w-full max-w-md" />
+      </div>
+    );
+  }
+
+  function ResultWorkspace() {
+    if (!generation) return null;
+    return (
+      <div className="flex h-full flex-col gap-4 overflow-y-auto p-1">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+          <div className="flex-1">
+            <Card className="overflow-hidden">
+              <CardContent className="flex min-h-[30vh] items-center justify-center bg-muted/20 p-2 md:min-h-[50vh] md:p-4">
+                {selectedResultImage ? (
+                  <img
+                    src={selectedResultImage.url}
+                    alt={selectedResultImage.label || "result"}
+                    className="max-h-[45vh] w-full object-contain md:max-h-[70vh]"
+                  />
+                ) : (
+                  <div className="text-muted-foreground">Нет изображений</div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="flex w-full shrink-0 flex-col gap-3 sm:w-64 lg:w-72">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Быстрые действия</CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
+                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleEditFocus} disabled={!selectedResultImage}>
+                  <MessageSquare className="mr-2 size-5 sm:size-4" /> Редактировать
+                </Button>
+                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
+                  <Download className="mr-2 size-5 sm:size-4" /> Скачать
+                </Button>
+                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleRegenerate} disabled={!selectedConcept}>
+                  <RefreshCw className="mr-2 size-5 sm:size-4" /> Новые
+                </Button>
+                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
+                  <Plus className="mr-2 size-5 sm:size-4" /> Похожий
+                </Button>
+                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={toggleFavorite}>
+                  <Heart className={`mr-2 size-5 sm:size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} />
+                  {isFavorite ? "В избранном" : "В избранное"}
+                </Button>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Формат и размер</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Select value={downloadFormat} onValueChange={(v) => setDownloadFormat(v as any)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="svg">SVG</SelectItem>
+                    <SelectItem value="png">PNG</SelectItem>
+                    <SelectItem value="jpg">JPG</SelectItem>
+                  </SelectContent>
+                </Select>
+                {downloadFormat !== "svg" && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs text-muted-foreground">Ширина</label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={downloadWidth}
+                        onChange={(e) => setDownloadWidth(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground">Высота</label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={downloadHeight}
+                        onChange={(e) => setDownloadHeight(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+                {downloadFormat !== "svg" && (
+                  <div className="flex flex-wrap gap-1">
+                    {["1080x1080", "1080x1920", "1200x630", "1920x1080", "1024x1024"].map((preset) => (
+                      <Button key={preset} variant="outline" size="sm" type="button" className="h-9 text-sm sm:h-8 sm:text-xs" onClick={() => applyPreset(preset)}>
+                        {preset}
+                      </Button>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Варианты</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {resultImages.map((img) => (
+                  <button
+                    key={img.id}
+                    onClick={() => setSelectedResultImage(img)}
+                    className={`flex w-full items-center gap-3 rounded-lg border p-2 text-left transition hover:bg-accent ${
+                      selectedResultImage?.id === img.id ? "ring-2 ring-primary" : ""
+                    }`}
+                  >
+                    <img src={img.url} alt={img.label || "variant"} className="size-20 rounded bg-muted object-contain sm:size-16" />
+                    <div className="flex-1">
+                      <p className="text-sm font-medium">{img.label}</p>
+                      {img.isSelected && <Badge variant="secondary">Выбран</Badge>}
+                    </div>
+                  </button>
+                ))}
+              </CardContent>
+            </Card>
+
+            <div className="flex gap-2">
+              <Button variant="outline" className="h-12 flex-1 text-base sm:h-10 sm:text-sm" onClick={handleBack}>
+                <ArrowLeft className="mr-1 size-5 sm:size-4" /> Назад
+              </Button>
+              <Button variant="destructive" className="h-12 flex-1 text-base sm:h-10 sm:text-sm" onClick={deleteGeneration}>
+                <Trash2 className="mr-1 size-5 sm:size-4" /> Удалить
+              </Button>
+            </div>
+            <Button asChild variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm">
+              <Link href="/projects">В личный кабинет</Link>
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function MainPanel() {
+    switch (mode) {
+      case "select":
+        return TemplateSelection();
+      case "interview":
+        return InterviewPlaceholder();
+      case "upload-edit":
+        return UploadEditPlaceholder();
+      case "concepts":
+        if (loading && concepts.length === 0) {
           return (
-            <div className="space-y-6 text-center">
-              <Wand2 className="mx-auto size-10 animate-pulse text-primary" />
-              <h2 className="text-2xl font-semibold">Анализируем нишу и генерируем концепции</h2>
-              <div className="mx-auto max-w-md space-y-3">
+            <div className="flex h-full flex-col items-center justify-center gap-4">
+              <Wand2 className="size-10 animate-pulse text-primary" />
+              <h2 className="text-2xl font-semibold">Готовим концепции</h2>
+              <div className="w-full max-w-md space-y-3">
                 <Skeleton className="h-24 w-full" />
                 <Skeleton className="h-24 w-full" />
                 <Skeleton className="h-24 w-full" />
@@ -311,149 +1157,33 @@ export function CreateWizard({
             </div>
           );
         }
-        return (
-          <div className="space-y-6">
-            <div className="text-center">
-              <h1 className="text-2xl font-semibold">Выберите концепцию</h1>
-              <p className="text-muted-foreground">{concepts.length} вариантов на основе вашей ниши</p>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {concepts.map((c) => (
-                <Card
-                  key={c.name}
-                  onClick={() => setSelectedConcept(c)}
-                  className={`cursor-pointer transition hover:border-primary ${
-                    selectedConcept?.name === c.name ? "ring-2 ring-primary" : ""
-                  }`}
-                >
-                  <CardHeader>
-                    <CardTitle>{c.name}</CardTitle>
-                    <CardDescription>{c.description}</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="flex gap-2">
-                      {c.palette.map((color) => (
-                        <span
-                          key={color}
-                          className="size-6 rounded-full border"
-                          style={{ backgroundColor: color }}
-                          title={color}
-                        />
-                      ))}
-                    </div>
-                    <ul className="space-y-1 text-sm text-muted-foreground">
-                      {c.recommendations.slice(0, 3).map((r, i) => (
-                        <li key={i}>• {r}</li>
-                      ))}
-                    </ul>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-        );
-
-      case 3:
-        return (
-          <div className="mx-auto max-w-2xl space-y-6">
-            <div>
-              <h1 className="text-2xl font-semibold">Детали макета</h1>
-              <p className="text-muted-foreground">Заполните данные, которые появятся на дизайне</p>
-            </div>
-            <Card>
-              <CardContent className="space-y-4 pt-6">
-                {fields.map((f) => (
-                  <div key={f.name} className="space-y-2">
-                    <Label htmlFor={f.name}>
-                      {f.label} {f.required && <span className="text-destructive">*</span>}
-                    </Label>
-                    {f.type === "textarea" ? (
-                      <Textarea
-                        id={f.name}
-                        value={data[f.name] ?? brandDefault(f.name)}
-                        onChange={(e) => setData({ ...data, [f.name]: e.target.value })}
-                      />
-                    ) : (
-                      <Input
-                        id={f.name}
-                        type={f.type || "text"}
-                        value={data[f.name] ?? brandDefault(f.name)}
-                        onChange={(e) => setData({ ...data, [f.name]: e.target.value })}
-                      />
-                    )}
-                  </div>
-                ))}
-                {fields.length === 0 && <p className="text-muted-foreground">Для этого шаблона не нужно заполнять дополнительные поля.</p>}
-              </CardContent>
-            </Card>
-          </div>
-        );
-
-      case 4:
-        return (
-          <div className="space-y-6 text-center">
-            <Sparkles className="mx-auto size-12 animate-pulse text-primary" />
-            <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
-            <p className="text-muted-foreground">Это может занять до одной минуты</p>
-            <Progress value={33} className="mx-auto max-w-md" />
-          </div>
-        );
-
-      case 5:
-        if (generation) {
-          return <ResultGallery generation={generation} onRegenerate={() => { setStep(4); generate(data); }} />;
-        }
-        return null;
-
+        return ConceptsPanel();
+      case "generating":
+        return GeneratingPanel();
+      case "result":
+        return ResultWorkspace();
       default:
         return null;
     }
   }
 
   return (
-    <div className="mx-auto max-w-6xl p-4 py-8">
+    <div className="flex h-[100dvh] flex-col gap-2 p-2 md:h-[calc(100vh-4rem)] md:gap-4 md:p-4">
       {error && (
-        <div className="mb-4 rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+        <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       )}
-      {renderStep()}
-
-      {step < 5 && (
-        <div className="mt-8 flex items-center justify-between">
-          <Button variant="outline" onClick={() => setStep(Math.max(0, step - 1))} disabled={step === 0 || loading}>
-            <ArrowLeft className="mr-1 size-4" /> Назад
-          </Button>
-          {step === 4 ? (
-            <Button disabled>
-              <Sparkles className="mr-1 size-4 animate-spin" /> Генерация...
-            </Button>
-          ) : (
-            <Button onClick={handleNext} disabled={nextDisabled() || loading}>
-              {step === 3 ? (
-                <>
-                  <Sparkles className="mr-1 size-4" /> Сгенерировать
-                </>
-              ) : (
-                <>
-                  Далее <ArrowRight className="ml-1 size-4" />
-                </>
-              )}
-            </Button>
-          )}
+      <div className="flex flex-1 min-h-0 flex-col gap-2 md:grid md:grid-cols-[360px_1fr] md:gap-4">
+        <div className="order-1 flex h-[45%] min-h-0 flex-col md:h-full">
+          {ChatPanel()}
         </div>
-      )}
-
-      {step === 5 && (
-        <div className="mt-8 flex justify-center gap-3">
-          <Button variant="outline" onClick={restart}>
-            Создать новый дизайн
-          </Button>
-          <Button asChild>
-            <Link href="/projects">В личный кабинет</Link>
-          </Button>
+        <div className="order-2 min-h-0 flex-1 overflow-hidden rounded-xl border bg-card shadow-sm md:h-full">
+          <div className="h-full overflow-y-auto p-2 md:p-4">
+            {MainPanel()}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

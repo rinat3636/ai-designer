@@ -38,11 +38,16 @@ export function normalizeSvg(svg: string): string {
   return s;
 }
 
-export async function svgToPngBlob(svgString: string, type: "image/png" | "image/jpeg"): Promise<Blob | null> {
+export async function svgToPngBlob(
+  svgString: string,
+  type: "image/png" | "image/jpeg",
+  width?: number,
+  height?: number
+): Promise<Blob | null> {
   const svg = normalizeSvg(svgString);
   const size = getViewBoxSize(svg);
-  const width = size?.width || 1024;
-  const height = size?.height || 1024;
+  const targetWidth = width && width > 0 ? width : size?.width || 1024;
+  const targetHeight = height && height > 0 ? height : size?.height || 1024;
 
   const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -52,15 +57,15 @@ export async function svgToPngBlob(svgString: string, type: "image/png" | "image
     img.crossOrigin = "anonymous";
     img.onload = () => {
       const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
       const ctx = canvas.getContext("2d");
       if (!ctx) return resolve(null);
       if (type === "image/jpeg") {
         ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillRect(0, 0, targetWidth, targetHeight);
       }
-      ctx.drawImage(img, 0, 0, width, height);
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
       URL.revokeObjectURL(url);
       canvas.toBlob((b) => resolve(b), type, 0.92);
     };
@@ -79,10 +84,16 @@ export async function downloadSvg(url: string, filename: string) {
   downloadBlob(blob, filename);
 }
 
-export async function downloadRaster(url: string, filename: string, type: "image/png" | "image/jpeg") {
+export async function downloadRaster(
+  url: string,
+  filename: string,
+  type: "image/png" | "image/jpeg",
+  width?: number,
+  height?: number
+) {
   const res = await fetch(url);
   const text = await res.text();
-  const blob = await svgToPngBlob(text, type);
+  const blob = await svgToPngBlob(text, type, width, height);
   if (!blob) throw new Error("Canvas conversion failed");
   downloadBlob(blob, filename);
 }
