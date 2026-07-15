@@ -132,26 +132,21 @@ export function ResultGallery({
     setEditLoading(true);
 
     try {
-      const res = await fetch(`/api/projects/${generation.id}`, {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruction: text, selectedImageUrl: selected.url, count: 2 }),
+        body: JSON.stringify({ projectId: generation.id, message: text, files: [] }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error);
+      if (!res.ok) throw new Error(json.error || json.message);
 
-      if (json.assistantMessage) {
-        setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
-      } else if (json.clarificationQuestion) {
-        setEditMessages((prev) => [...prev, { role: "assistant", content: json.clarificationQuestion }]);
-      } else {
-        const newImages = (json.images || []) as GenerationImage[];
-        if (newImages.length > 0) {
-          setImages((prev) => [...prev, ...newImages]);
-          setSelected(newImages[0]);
-          toast("Варианты отредактированы");
-        }
-        setEditMessages((prev) => [...prev, { role: "assistant", content: "Готово. Новые варианты добавлены ниже." }]);
+      if (json.generation) {
+        setImages(json.generation.images || []);
+        setSelected(json.generation.images?.[0] || selected);
+        toast("Варианты отредактированы");
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.message || "Готово. Новые варианты добавлены ниже." }]);
+      } else if (json.message) {
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.message }]);
       }
     } catch (e: any) {
       toast.error(e.message || "Не удалось отредактировать");

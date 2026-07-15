@@ -39,31 +39,23 @@ async function runOnce() {
   try {
     console.log("1. Open /create");
     await page.goto(`${BASE_URL}/create`);
-    await page.waitForSelector("text=Что хотите сделать?", { timeout: 15000 });
+    await page.locator("text=Чат с ИИ-дизайнером").first().waitFor({ timeout: 15000 });
 
-    console.log("2. Select 'Редактировать свой макет'");
-    await page.locator('.cursor-pointer:has-text("Редактировать свой макет")').first().click();
-    await page.waitForFunction(() => {
-      const t = document.querySelector("textarea");
-      return t && !t.disabled;
-    }, { timeout: 15000 });
-
-    console.log("3. Upload certificate image and request red background");
+    console.log("2. Upload certificate image and request red background");
     const fileInput = page.locator('input[type="file"]').first();
     await fileInput.setInputFiles(CERT_PATH);
-    // wait for image chip to appear
     await page.waitForSelector("img[src^='/uploads/']", { timeout: 30000 });
     await page.locator("textarea").fill("Сделай фон красным, сохрани весь текст");
     await page.locator("button:has-text('OK')").click();
 
-    console.log("4. Wait for result image");
+    console.log("3. Wait for result image");
     const resultImg = page.locator("img[src^='/generated/']").first();
     await resultImg.waitFor({ timeout: 240000 });
     const src = await resultImg.getAttribute("src");
     assert(src && src.includes("/generated/"), "No generated image");
     console.log("   Result image:", src);
 
-    console.log("5. Verify red background in SVG");
+    console.log("4. Verify red background in SVG");
     const svgText = await fetch(`${BASE_URL}${src}`).then((r) => r.text());
     assert(svgText.includes("СЕРТИФИКАТ"), "Certificate text not preserved");
     const isRedHex = (hex) => {

@@ -154,13 +154,14 @@ async function generateFromRequest(
     else nonSvgRefs.push(url);
   }
 
-  const isEdit = rawRefs.length > 0 && sourceSvg;
+  const isUpload = rawRefs.length > 0;
+  const isEdit = isUpload && Boolean(sourceSvg);
 
   let viewBox = getViewBoxForTemplate(candidate.slug);
   const userSize = parseUserSize(data?.size || brief?.size);
   if (userSize) {
     viewBox = `0 0 ${userSize.width} ${userSize.height}`;
-  } else if (!isEdit && nonSvgRefs.length > 0) {
+  } else if (isUpload && nonSvgRefs.length > 0) {
     const dims = await readLocalImageSize(nonSvgRefs[0]);
     if (dims) viewBox = `0 0 ${dims.width} ${dims.height}`;
   }
@@ -172,7 +173,7 @@ async function generateFromRequest(
       title: data.headline || data.productName || candidate.name,
       brief: brief as any,
       concept: concept as any,
-      data: { ...(data || {}), referenceImageUrls: rawRefs, editNote: isEdit ? message : "" } as any,
+      data: { ...(data || {}), referenceImageUrls: rawRefs, editNote: isUpload ? message : "" } as any,
       chatHistory: [{ role: "user", content: message, at: new Date().toISOString() }] as any,
       conceptName: concept.name,
       status: "generating",

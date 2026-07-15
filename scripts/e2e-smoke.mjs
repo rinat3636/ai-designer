@@ -18,19 +18,17 @@ async function runOnce() {
     console.log("1. Test /create mobile load");
     await page.goto(`${BASE_URL}/create`);
     await page.waitForLoadState("networkidle");
-    const heading = await page.locator("h1").first().innerText({ timeout: 15000 });
-    assert(heading.includes("Что хотите сделать?"), `Unexpected heading: ${heading}`);
+    await page.locator("text=Чат с ИИ-дизайнером").first().waitFor({ timeout: 15000 });
+    const heading = await page.locator("h3").first().innerText({ timeout: 15000 });
+    assert(heading.includes("Чат с ИИ-дизайнером"), `Unexpected heading: ${heading}`);
     console.log("   /create loaded with heading:", heading.trim());
 
-    console.log("2. Select 'Логотип' template");
-    await page.getByText("Сгенерировать новый дизайн", { exact: true }).first().click();
-    await page.getByText("Логотип", { exact: true }).first().waitFor({ timeout: 15000 });
-    await page.getByText("Логотип", { exact: true }).first().click();
+    console.log("2. Wait for chat input");
     await page.waitForFunction(() => {
       const t = document.querySelector('textarea');
       return t && !t.disabled;
     }, { timeout: 15000 });
-    console.log("   Template selected, chat active");
+    console.log("   Chat active");
 
     console.log("3. Send a message and wait for result");
     await page.locator("textarea").fill("Нужен логотип для строительной компании КаркасПро, каркасные дома, минимализм, синий и серый, 1200x1200");

@@ -113,7 +113,7 @@ async function callChatCompletionOnce(
   const cfg = getApiConfig();
   if (!cfg) return { ok: false, retryable: false };
 
-  const timeoutMs = 90000;
+  const timeoutMs = Math.max(90000, maxTokens * 20);
   const timeoutController = new AbortController();
   const timeoutId = setTimeout(() => timeoutController.abort("timeout"), timeoutMs);
 
@@ -1135,14 +1135,14 @@ ${STABLE_IDS_RULE}
 ${DESIGN_QUALITY_RULES}`;
 
   const userPrompt = isEdit ? buildEditPrompt(input) : buildDesignPrompt(input);
-  const maxTokens = isEdit ? 8000 : 12000;
+  const maxTokens = isEdit ? 10000 : 12000;
 
   async function attempt(): Promise<string | null> {
     let text: string | null = null;
     const refs = (await Promise.all((input.referenceImages || []).map(imageUrlToBase64))).filter(
       (u): u is string => Boolean(u)
     );
-    const useImagePrompt = process.env.USE_IMAGE_PROMPT !== "false";
+    const useImagePrompt = process.env.USE_IMAGE_PROMPT === "true";
     if (useImagePrompt && !isEdit && !input.sourceSvg) {
       const imageUrl = await promptToPngDataUrl(userPrompt, input.viewBox);
       const content: ChatContentPart[] = [{ type: "image_url", image_url: { url: imageUrl } }];
@@ -1293,19 +1293,20 @@ function passesBoundsCheck(svg: string): boolean {
 
 const STABLE_IDS_RULE = `STABLE IDS (mandatory): assign stable id attributes to key elements so they can be edited individually later: id="background" (full-bleed background), id="logo", id="headline", id="subheadline", id="phone", id="website", id="address", id="email", id="cta", id="qr". Wrap multi-shape elements (like a logo) in <g id="...">. If a QR code is required, output ONLY a single placeholder <rect id="qr" x="..." y="..." width="..." height="..." fill="#ffffff"/> — the real QR code is inserted programmatically.`;
 
-const DESIGN_QUALITY_RULES = `DESIGN QUALITY RULES (mandatory):
-1. Composition: logical and balanced layout, no chaotic placement, no large empty zones, no overlapping elements.
-2. Visual hierarchy: headline \u2192 image/offer \u2192 CTA/button \u2192 contacts \u2192 logo. The most important element must dominate.
-3. Alignment: consistent spacing, precise centering, follow an invisible modular grid.
-4. Safe zones: keep all text and important elements inside a safe area of at least 4% of width/height from every edge.
-5. Balance text, imagery and whitespace \u2014 generous breathing room, minimalist and modern.
-6. Typography: modern fonts, readable sizes, comfortable line height and letter spacing; never squeeze text.
-7. Color harmony: use the provided palette (or a niche-appropriate palette); limit to 2-4 dominant colors.
-8. Contrast: all text must be clearly readable \u2014 never light-on-light or dark-on-dark.
-9. Element sizing: logo, phone, website, QR code, buttons and images sized appropriately for their importance.
-10. Contacts placed logically (bottom or corner), visible but not distracting.
-11. Format-specific composition: logo \u2014 clean mark; banner \u2014 big headline; product card \u2014 product first; stories \u2014 vertical flow; business card \u2014 compact info blocks; certificate \u2014 formal symmetric layout.
-12. SELF-CHECK before output: verify alignment, readability, no overlaps, safe zones respected, professional modern look. Fix any issue, then output the SVG.`;
+const DESIGN_QUALITY_RULES = `DESIGN QUALITY RULES (mandatory) — the result must look professional, beautiful and "rich":
+1. Visual impact: create a polished, premium-looking design. Avoid flat/boring layouts; use tasteful gradients, subtle shadows, layered shapes and a clear focal point where appropriate, while staying vector-based.
+2. Composition: logical and balanced layout, no chaotic placement, no large empty zones, no overlapping elements.
+3. Visual hierarchy: headline \u2192 image/offer \u2192 CTA/button \u2192 contacts \u2192 logo. The most important element must dominate.
+4. Alignment: consistent spacing, precise centering, follow an invisible modular grid.
+5. Safe zones: keep all text and important elements inside a safe area of at least 4% of width/height from every edge.
+6. Balance text, imagery and whitespace \u2014 generous breathing room, but not empty.
+7. Typography: modern, readable fonts, comfortable line height and letter spacing; never squeeze text. Use 2-3 font sizes max.
+8. Color harmony: use the provided palette (or a niche-appropriate palette); limit to 2-4 dominant colors, with accents for CTAs.
+9. Contrast: all text must be clearly readable \u2014 never light-on-light or dark-on-dark.
+10. Element sizing: logo, phone, website, QR code, buttons and images sized appropriately for their importance.
+11. Contacts placed logically (bottom or corner), visible but not distracting.
+12. Format-specific composition: logo \u2014 clean memorable mark; banner \u2014 bold headline; product card \u2014 product first; stories \u2014 vertical flow; business card \u2014 compact info blocks; certificate \u2014 formal symmetric layout.
+13. SELF-CHECK before output: verify alignment, readability, contrast, no overlaps, safe zones respected, professional modern premium look. Fix any issue, then output the SVG.`;
 
 const LABELS: Record<string, string> = {
   headline: "Headline",
@@ -1369,11 +1370,11 @@ function buildDesignPrompt(input: DesignGenerationInput): string {
 
   const memoryNote = input.memory ? `\n${memoryToPromptText(input.memory)}` : "";
 
-  return `Create a ${role} for "${brief.companyName || template.name}".
-Business: ${trunc(brief.businessDesc, 80) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 50)}. Palette: ${concept.palette.join(", ")}.
+  return `Create a visually stunning, professional, modern ${role} for "${brief.companyName || template.name}".
+Business: ${trunc(brief.businessDesc, 120) || "—"}. Concept: ${concept.name}. Style: ${trunc(brief.style || concept.name, 80)}. Palette: ${concept.palette.join(", ")}.
 Template: ${template.name}.${designHint}${transparentNote}${referenceNote}${presetNote}${memoryNote}
 viewBox="${viewBox}" (${w}×${h}).${textBlocks ? "\n" + textBlocks : ""}
-Output raw SVG only.`;
+Make it look rich and premium. Output raw SVG only.`;
 }
 
 function buildEditPrompt(input: DesignGenerationInput): string {
@@ -1385,11 +1386,22 @@ function buildEditPrompt(input: DesignGenerationInput): string {
     .map(([k, v]) => `${fieldLabel(k)}: ${v}`)
     .join("\n");
 
-  let body = `Apply ONLY the requested change and return the full updated SVG. Keep the same viewBox "${viewBox}". Preserve the original text exactly: do not rewrite, translate, or stylize it. Preserve the original text colors; only change a text color if the new background makes it hard to read, and then only to keep the text clearly readable. Do not redesign, do not add or remove elements, and do not change text, layout, fonts, sizes, or positions unless the request explicitly says so.`;
+  let body = `Apply ONLY the requested change and return the full updated SVG. Keep the same viewBox "${viewBox}".
+
+PRESERVATION RULES (mandatory):
+- Keep the original text exactly as-is: do not rewrite, translate, rephrase or stylize it.
+- Preserve the original fonts, font sizes, font weights and text colors.
+- Preserve the original layout, positions, spacing, alignment and composition.
+- Preserve all logos, marks, frames, borders and decorative details.
+- Do NOT redesign, do NOT add or remove elements, and do NOT change text, layout, fonts, sizes, positions or colors unless the request explicitly says so.
+- If the request is only about color/background, change ONLY that; keep everything else identical.`;
 
   if (textBlocks) body += `\nText/content to keep exactly as-is:\n${textBlocks}`;
-  if (input.sourceSvg) body += `\n\nCURRENT SVG TO EDIT:\n${input.sourceSvg}`;
-  if (hasImage && !input.sourceSvg) body += `\n\nThe current design is shown in the attached image(s). Recreate it as an SVG faithfully: copy the exact visible text, layout, colors, and composition, then apply ONLY the requested change. Do not use generic placeholder text such as "Design Title" or "Subtitle" — use the real text from the image.`;
+  if (input.sourceSvg) {
+    body += `\n\nCURRENT SVG TO EDIT (keep every element unless the change explicitly targets it):\n${input.sourceSvg}`;
+  } else if (hasImage) {
+    body += `\n\nThe current design is shown in the attached image(s). First faithfully recreate it as an SVG: copy the exact visible text, layout, colors, and composition. Then apply ONLY the requested change. Do not use generic placeholder text such as "Design Title" or "Subtitle" — use the real text from the image.`;
+  }
   if (input.memory) body += `\n\nUser preferences and history (follow them, avoid repeating past mistakes):\n${memoryToPromptText(input.memory)}`;
 
   body += `\n\nChange to apply: ${input.editNote}\n\nReturn the updated SVG only.`;
