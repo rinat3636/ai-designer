@@ -1,12 +1,13 @@
 import fs from "fs";
 import path from "path";
 import sharp from "sharp";
+import { sanitizeSvg } from "@/lib/sanitize";
 
 export function saveSvg(generationId: string, imageId: string, svg: string): string {
   const dir = path.join(process.cwd(), "public", "generated", generationId);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, `${imageId}.svg`);
-  fs.writeFileSync(filePath, svg, "utf-8");
+  fs.writeFileSync(filePath, sanitizeSvg(svg), "utf-8");
   return `/generated/${generationId}/${imageId}.svg`;
 }
 

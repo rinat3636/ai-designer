@@ -46,6 +46,14 @@ function extractSize(text: string): string {
 }
 
 const UPLOAD_TEMPLATE_ID = "upload";
+const WORKSPACE_STORAGE_KEY = "ai-designer-workspace";
+const SCALE_TARGETS: { label: string; match: RegExp }[] = [
+  { label: "Баннер", match: /баннер|banner|hero/i },
+  { label: "Визитка", match: /визитк|business/i },
+  { label: "Пост", match: /пост|post/i },
+  { label: "Stories", match: /stories|сторис/i },
+  { label: "Листовка", match: /листовк|флаер|flyer/i },
+];
 const UPLOAD_TEMPLATE: Template = {
   id: UPLOAD_TEMPLATE_ID,
   slug: "custom-upload",
@@ -103,8 +111,14 @@ export function CreateWizard({
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [lastRecommendation, setLastRecommendation] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const selectionHistoryRef = useRef<GenerationImage[]>([]);
+  const restoredRef = useRef(false);
+  const recommendedForRef = useRef<string>("");
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -122,6 +136,82 @@ export function CreateWizard({
     }
     return map;
   }, [templates]);
+
+  // Autosave: restore the last session so an accidentally closed tab
+  // continues from where the user left off.
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    try {
+      const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved.generationId) {
+        fetch(`/api/projects/${saved.generationId}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((json) => {
+            if (json?.generation) {
+              setGeneration(json.generation);
+              setMode("result");
+              recommendedForRef.current = json.generation.id;
+              toast("Продолжаем с последнего места");
+            }
+          })
+          .catch(() => {});
+      } else if (["interview", "upload-edit", "concepts"].includes(saved.mode)) {
+        setSelectedTemplateId(saved.selectedTemplateId || "");
+        setMessages(saved.messages || []);
+        setCurrentData(saved.currentData || {});
+        setConcepts(saved.concepts || []);
+        setAnalysis(saved.analysis || "");
+        setMode(saved.mode);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    try {
+      localStorage.setItem(
+        WORKSPACE_STORAGE_KEY,
+        JSON.stringify({
+          mode,
+          selectedTemplateId,
+          messages,
+          currentData,
+          concepts,
+          analysis,
+          generationId: generation?.id || null,
+        })
+      );
+    } catch {}
+  }, [mode, selectedTemplateId, messages, currentData, concepts, analysis, generation]);
+
+  // Proactive review: after a generation the assistant analyzes the result
+  // and suggests improvements the user can apply with one click.
+  useEffect(() => {
+    if (mode !== "result" || !generation || recommendedForRef.current === generation.id) return;
+    recommendedForRef.current = generation.id;
+    fetch(`/api/projects/${generation.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction:
+          "Проанализируй текущий дизайн как эксперт и дай максимум 2 конкретные рекомендации по улучшению (например: увеличить заголовок, перенести QR-код). Коротко, списком. Это вопрос-консультация, ничего не меняй.",
+        selectedImageUrl: generation.images?.[0]?.url,
+        messages: [],
+        count: 1,
+      }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.assistantMessage) {
+          setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
+          setLastRecommendation(json.assistantMessage);
+        }
+      })
+      .catch(() => {});
+  }, [mode, generation]);
 
   useEffect(() => {
     if (selectedTemplateId && mode === "select") {
@@ -243,13 +333,8 @@ export function CreateWizard({
     e.target.value = "";
   }
 
-  async function sendMessage() {
-    const text = inputText.trim();
-
-    // On the first screen, resolve the template from free-form text:
-    // "сделай Stories для кофейни" selects the right template automatically.
-    if (mode === "select") {
-      if (!text) return;
+  async function startFromText(text: string) {
+    if (!text) return;
       setLoading(true);
       setError("");
       try {
@@ -300,6 +385,15 @@ export function CreateWizard({
       } finally {
         setLoading(false);
       }
+  }
+
+  async function sendMessage() {
+    const text = inputText.trim();
+
+    // On the first screen, resolve the template from free-form text:
+    // "сделай Stories для кофейни" selects the right template automatically.
+    if (mode === "select") {
+      await startFromText(text);
       return;
     }
 
@@ -512,11 +606,20 @@ export function CreateWizard({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error);
 
-      if (json.clarificationQuestion) {
+      if (json.revert) {
+        const previous = selectionHistoryRef.current.pop();
+        if (previous) {
+          setSelectedResultImage(previous);
+        }
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage || "Вернул предыдущий вариант." }]);
+      } else if (json.assistantMessage) {
+        setEditMessages((prev) => [...prev, { role: "assistant", content: json.assistantMessage }]);
+      } else if (json.clarificationQuestion) {
         setEditMessages((prev) => [...prev, { role: "assistant", content: json.clarificationQuestion }]);
       } else {
         const newImages = (json.images || []) as GenerationImage[];
         if (newImages.length > 0) {
+          if (selectedResultImage) selectionHistoryRef.current.push(selectedResultImage);
           setResultImages((prev) => [...prev, ...newImages]);
           setSelectedResultImage(newImages[0]);
           toast("Варианты отредактированы");
@@ -570,6 +673,56 @@ export function CreateWizard({
 
   function handleCreateSimilar() {
     sendEditInstruction("Сделай похожий вариант с небольшими отличиями", true);
+  }
+
+  function applyRecommendation() {
+    if (!lastRecommendation) return;
+    setLastRecommendation("");
+    sendEditInstruction(`Примени эти рекомендации к текущему дизайну, сохранив всё остальное: ${lastRecommendation}`, true);
+  }
+
+  // One-click scaling: create a banner/business card/post/stories/flyer
+  // in the same style as the finished design.
+  async function handleScaleTo(target: Template) {
+    if (!generation || !selectedResultImage) return;
+    const brief = buildBrief();
+    const concept: Concept =
+      selectedConcept ||
+      (generation.concept as unknown as Concept | null) || {
+        name: "В том же стиле",
+        description: "Повторить стиль готового дизайна в новом формате",
+        palette: [],
+        recommendations: ["Сохранить стиль, цвета и типографику референса"],
+      };
+    setLoading(true);
+    setError("");
+    setMode("generating");
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateId: target.id,
+          brief,
+          concept,
+          data: { ...(currentData.data || {}) },
+          referenceImageUrls: [selectedResultImage.url],
+          editNote: `Создай ${target.name} в том же стиле, что и референс: те же цвета, шрифты и характер.`,
+          count: 1,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error);
+      setSelectedTemplateId(target.id);
+      setGeneration(json.generation);
+      setMode("result");
+      toast.success(`${target.name} в том же стиле готов!`);
+    } catch (e: any) {
+      setError(e.message || "Ошибка генерации");
+      setMode("result");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleEditFocus() {
@@ -727,8 +880,44 @@ export function CreateWizard({
 
         <div ref={chatScrollRef} className="flex-1 space-y-4 overflow-y-auto p-3">
           {activeMessages.length === 0 && mode === "select" && (
-            <div className="text-center text-sm text-muted-foreground">
-              Напишите, что нужно, например: «Сделай Stories 1080x1920 для кофейни» — и я сам подберу шаблон. Или выберите тип дизайна справа.
+            <div className="space-y-3">
+              <div className="flex justify-start">
+                <div className="max-w-[90%] rounded-xl bg-muted px-3 py-2 text-sm text-foreground">
+                  Здравствуйте! Что вы хотите создать сегодня? Выберите вариант или просто опишите задачу своими словами.
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {["Логотип", "Баннер", "Карточка товара", "Инфографика", "Визитка"].map((label) => (
+                  <Button
+                    key={label}
+                    type="button"
+                    variant="outline"
+                    className="h-11 justify-start text-sm"
+                    disabled={loading}
+                    onClick={() => startFromText(`Нужен ${label.toLowerCase()}`)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-11 justify-start text-sm"
+                  disabled={loading}
+                  onClick={() => setShowTemplates(true)}
+                >
+                  Другое
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="col-span-2 h-11 justify-start text-sm"
+                  disabled={loading}
+                  onClick={() => setSelectedTemplateId(UPLOAD_TEMPLATE_ID)}
+                >
+                  <Upload className="mr-2 size-4" /> Редактировать свой макет
+                </Button>
+              </div>
             </div>
           )}
           {activeMessages.length === 0 && mode === "upload-edit" && (
@@ -759,6 +948,13 @@ export function CreateWizard({
               </div>
             </div>
           ))}
+          {isResult && lastRecommendation && !loading && (
+            <div className="flex justify-start">
+              <Button size="sm" onClick={applyRecommendation}>
+                <Wand2 className="mr-1 size-4" /> Исправить
+              </Button>
+            </div>
+          )}
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Wand2 className="size-4 animate-pulse" />
@@ -986,63 +1182,130 @@ export function CreateWizard({
   }
 
   function GeneratingPanel() {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
-        <Sparkles className="size-12 animate-pulse text-primary" />
-        <div>
-          <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
-          <p className="text-muted-foreground">Это может занять до одной минуты</p>
-        </div>
-        <Progress value={50} className="w-full max-w-md" />
-      </div>
-    );
+    return <GenerationProgress />;
   }
 
   function ResultWorkspace() {
     if (!generation) return null;
+    const scaleTargets = SCALE_TARGETS.flatMap(({ label, match }) => {
+      const t = templates.find(
+        (tpl) => tpl.id !== generation.templateId && (match.test(tpl.name) || match.test(tpl.slug))
+      );
+      return t ? [{ label, template: t }] : [];
+    });
+    const selectedIndex = resultImages.findIndex((i) => i.id === selectedResultImage?.id);
+    const compareImage =
+      selectionHistoryRef.current[selectionHistoryRef.current.length - 1] ||
+      (selectedIndex > 0 ? resultImages[selectedIndex - 1] : null);
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto p-1">
+        {fullscreen && selectedResultImage && (
+          <div
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/90 p-4"
+            onClick={() => setFullscreen(false)}
+          >
+            <img
+              src={selectedResultImage.url}
+              alt={selectedResultImage.label || "result"}
+              className="max-h-[85vh] max-w-full object-contain"
+            />
+            <Button variant="secondary" className="mt-4" onClick={() => setFullscreen(false)}>
+              Закрыть
+            </Button>
+          </div>
+        )}
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
           <div className="flex-1">
             <Card className="overflow-hidden">
               <CardContent className="flex min-h-[30vh] items-center justify-center bg-muted/20 p-2 md:min-h-[50vh] md:p-4">
-                {selectedResultImage ? (
+                {compareOpen && compareImage && selectedResultImage ? (
+                  <div className="grid w-full grid-cols-2 gap-2">
+                    {[compareImage, selectedResultImage].map((img, idx) => (
+                      <div key={img.id + idx} className="flex flex-col items-center gap-2">
+                        <p className="text-xs text-muted-foreground">{idx === 0 ? "Предыдущий" : "Текущий"}</p>
+                        <img src={img.url} alt={img.label || "variant"} className="max-h-[40vh] w-full object-contain md:max-h-[60vh]" />
+                        <Button
+                          size="sm"
+                          variant={idx === 1 ? "default" : "outline"}
+                          onClick={() => {
+                            setSelectedResultImage(img);
+                            setCompareOpen(false);
+                            toast("Вариант выбран — дальнейшие правки применяются к нему");
+                          }}
+                        >
+                          Выбрать победителя
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : selectedResultImage ? (
                   <img
                     src={selectedResultImage.url}
                     alt={selectedResultImage.label || "result"}
-                    className="max-h-[45vh] w-full object-contain md:max-h-[70vh]"
+                    className="max-h-[45vh] w-full cursor-zoom-in object-contain md:max-h-[70vh]"
+                    onClick={() => setFullscreen(true)}
                   />
                 ) : (
                   <div className="text-muted-foreground">Нет изображений</div>
                 )}
               </CardContent>
             </Card>
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <Button className="h-11 text-sm" onClick={handleEditFocus} disabled={!selectedResultImage}>
+                <MessageSquare className="mr-1 size-4" /> Изменить
+              </Button>
+              <Button className="h-11 text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
+                <Download className="mr-1 size-4" /> Скачать
+              </Button>
+              <Button variant="outline" className="h-11 text-sm" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
+                <Plus className="mr-1 size-4" /> Похожий
+              </Button>
+              <Button
+                variant={compareOpen ? "default" : "outline"}
+                className="h-11 text-sm"
+                onClick={() => setCompareOpen((v) => !v)}
+                disabled={!compareImage}
+              >
+                <RefreshCw className="mr-1 size-4" /> Сравнить
+              </Button>
+              <Button variant="outline" className="h-11 text-sm" onClick={toggleFavorite}>
+                <Heart className={`mr-1 size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} /> Лучший
+              </Button>
+            </div>
           </div>
 
           <div className="flex w-full shrink-0 flex-col gap-3 sm:w-64 lg:w-72">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Быстрые действия</CardTitle>
+                <CardTitle className="text-base">Ещё</CardTitle>
               </CardHeader>
               <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
-                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleEditFocus} disabled={!selectedResultImage}>
-                  <MessageSquare className="mr-2 size-5 sm:size-4" /> Редактировать
-                </Button>
-                <Button className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleDownload} disabled={!selectedResultImage}>
-                  <Download className="mr-2 size-5 sm:size-4" /> Скачать
-                </Button>
                 <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleRegenerate} disabled={!selectedConcept}>
-                  <RefreshCw className="mr-2 size-5 sm:size-4" /> Новые
-                </Button>
-                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={handleCreateSimilar} disabled={!selectedResultImage}>
-                  <Plus className="mr-2 size-5 sm:size-4" /> Похожий
-                </Button>
-                <Button variant="outline" className="h-12 w-full text-base sm:h-10 sm:text-sm" onClick={toggleFavorite}>
-                  <Heart className={`mr-2 size-5 sm:size-4 ${isFavorite ? "fill-red-500 text-red-500" : ""}`} />
-                  {isFavorite ? "В избранном" : "В избранное"}
+                  <RefreshCw className="mr-2 size-5 sm:size-4" /> Новые варианты
                 </Button>
               </CardContent>
             </Card>
+
+            {scaleTargets.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Создать в этом же стиле</CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-1">
+                  {scaleTargets.map(({ label, template: t }) => (
+                    <Button
+                      key={t.id}
+                      variant="outline"
+                      className="h-12 w-full text-base sm:h-10 sm:text-sm"
+                      disabled={loading || !selectedResultImage}
+                      onClick={() => handleScaleTo(t)}
+                    >
+                      <Plus className="mr-2 size-5 sm:size-4" /> {label}
+                    </Button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader>
@@ -1097,10 +1360,10 @@ export function CreateWizard({
 
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Варианты</CardTitle>
+                <CardTitle className="text-base">История версий</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2">
-                {resultImages.map((img) => (
+                {resultImages.map((img, idx) => (
                   <button
                     key={img.id}
                     onClick={() => setSelectedResultImage(img)}
@@ -1110,8 +1373,9 @@ export function CreateWizard({
                   >
                     <img src={img.url} alt={img.label || "variant"} className="size-20 rounded bg-muted object-contain sm:size-16" />
                     <div className="flex-1">
-                      <p className="text-sm font-medium">{img.label}</p>
-                      {img.isSelected && <Badge variant="secondary">Выбран</Badge>}
+                      <p className="text-sm font-medium">Версия {idx + 1}</p>
+                      {img.label && <p className="text-xs text-muted-foreground">{img.label}</p>}
+                      {selectedResultImage?.id === img.id && <Badge variant="secondary">Текущая</Badge>}
                     </div>
                   </button>
                 ))}
@@ -1184,6 +1448,45 @@ export function CreateWizard({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+const GENERATION_STAGES = [
+  "Анализ брифа и концепции",
+  "Построение композиции",
+  "Отрисовка макета",
+  "Проверка качества",
+  "Финальная подготовка",
+];
+
+function GenerationProgress() {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const stageIndex = Math.min(Math.floor(elapsed / 12), GENERATION_STAGES.length - 1);
+  const progress = Math.min(5 + elapsed * 1.6, 95);
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
+      <Sparkles className="size-12 animate-pulse text-primary" />
+      <div>
+        <h2 className="text-2xl font-semibold">Генерируем макеты</h2>
+        <p className="text-muted-foreground">{GENERATION_STAGES[stageIndex]}…</p>
+      </div>
+      <Progress value={progress} className="w-full max-w-md" />
+      <ul className="space-y-1 text-left text-sm text-muted-foreground">
+        {GENERATION_STAGES.map((stage, i) => (
+          <li key={stage} className={i < stageIndex ? "text-foreground" : i === stageIndex ? "text-primary" : ""}>
+            {i < stageIndex ? "✓ " : i === stageIndex ? "→ " : "· "}
+            {stage}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

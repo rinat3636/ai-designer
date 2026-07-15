@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { chatInterview } from "@/lib/llm";
 
@@ -10,6 +11,7 @@ export async function POST(request: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  if (!rateLimit(`interview:${user.id}`, 30, 60_000)) return rateLimitResponse();
 
   try {
     const body = await request.json();
@@ -27,7 +29,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Template not found" }, { status: 404 });
     }
 
-    const result = await chatInterview(messages, template, currentData || {});
+    const memory = await prisma.projectMemory.findUnique({ where: { userId: user.id } });
+    const result = await chatInterview(messages, template, currentData || {}, memory);
     return NextResponse.json(result);
   } catch (error) {
     console.error("Interview API error", error);
