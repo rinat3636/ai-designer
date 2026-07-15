@@ -1009,6 +1009,8 @@ const LABELS: Record<string, string> = {
   cta: "CTA",
   qrUrl: "QR",
   logoUrl: "Logo",
+  extractedText: "Exact visible text (reproduce verbatim)",
+  layoutDescription: "Original layout (preserve)",
 };
 
 function fieldLabel(key: string): string {

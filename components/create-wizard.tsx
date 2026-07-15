@@ -81,6 +81,7 @@ export function CreateWizard({
 }) {
   const [mode, setMode] = useState<WizardMode>("select");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const [showTemplates, setShowTemplates] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentData, setCurrentData] = useState<Record<string, any>>({});
   const [inputText, setInputText] = useState("");
@@ -426,12 +427,12 @@ export function CreateWizard({
       logoUrl: images[0] || "",
     };
 
+    // Leave size empty unless explicitly requested so the server can keep
+    // the uploaded image's original dimensions.
     const size = extractSize(editInstruction) || currentData.size || "";
-    const viewBox = getViewBoxForTemplate(template.slug);
-    const defaultSize = getViewBoxSize(`<svg viewBox="${viewBox}"/>`);
     const data: Record<string, string> = {
       ...(currentData.data || {}),
-      size: size || (defaultSize ? `${defaultSize.width}x${defaultSize.height}` : ""),
+      size,
       editInstruction,
     };
 
@@ -835,9 +836,8 @@ export function CreateWizard({
           <h1 className="text-2xl font-semibold">Что хотите сделать?</h1>
           <p className="text-muted-foreground">Редактируйте свой макет или создайте новый дизайн с помощью ИИ</p>
         </div>
-        <div className="space-y-8">
-          <div>
-            <h2 className="mb-3 text-lg font-medium">Редактор макета</h2>
+        {!showTemplates ? (
+          <div className="mx-auto grid max-w-2xl gap-4">
             <Card
               onClick={() => setSelectedTemplateId(UPLOAD_TEMPLATE_ID)}
               className={`cursor-pointer transition hover:border-primary ${
@@ -845,7 +845,7 @@ export function CreateWizard({
               }`}
             >
               <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
-                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <div className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                   <Upload className="size-6" />
                 </div>
                 <div>
@@ -854,7 +854,26 @@ export function CreateWizard({
                 </div>
               </CardContent>
             </Card>
+            <Card
+              onClick={() => setShowTemplates(true)}
+              className="cursor-pointer transition hover:border-primary"
+            >
+              <CardContent className="flex flex-col items-start gap-4 pt-6 sm:flex-row sm:items-start">
+                <div className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Wand2 className="size-6" />
+                </div>
+                <div>
+                  <CardTitle>Сгенерировать новый дизайн</CardTitle>
+                  <CardDescription>Выберите тип дизайна или просто опишите задачу в чате — ИИ подберёт шаблон сам.</CardDescription>
+                </div>
+              </CardContent>
+            </Card>
           </div>
+        ) : (
+        <div className="space-y-8">
+          <Button variant="ghost" size="sm" onClick={() => setShowTemplates(false)}>
+            <ArrowLeft className="mr-1 size-4" /> Назад
+          </Button>
           {Array.from(categories.entries()).map(([catKey, items]) => (
             <div key={catKey}>
               <h2 className="mb-3 text-lg font-medium">{items[0]?.category}</h2>
@@ -882,6 +901,7 @@ export function CreateWizard({
             </div>
           ))}
         </div>
+        )}
       </div>
     );
   }

@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { generateDesigns, analyzeImage, type Brief, type Concept } from "@/lib/llm";
 import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
-import { saveSvg, readLocalSvg } from "@/lib/storage";
+import { saveSvg, readLocalSvg, readLocalImageSize } from "@/lib/storage";
 
 export const maxDuration = 300;
 
@@ -53,6 +53,9 @@ export async function POST(request: NextRequest) {
         const text = analysis.text || analysis.description || "";
         if (text) {
           enrichedData = { ...enrichedData, extractedText: text };
+          if (analysis.composition) {
+            enrichedData = { ...enrichedData, layoutDescription: analysis.composition };
+          }
           if (!enrichedBrief.businessDesc?.trim()) {
             enrichedBrief = { ...enrichedBrief, businessDesc: analysis.description || "Загруженный макет" };
           }
@@ -151,6 +154,10 @@ export async function POST(request: NextRequest) {
     const userSize = parseUserSize(data?.size || brief?.size);
     if (userSize) {
       viewBox = `0 0 ${userSize.width} ${userSize.height}`;
+    } else if (editNote && !sourceSvg && nonSvgRefs.length > 0) {
+      // Editing an uploaded raster: keep the original image dimensions.
+      const dims = await readLocalImageSize(nonSvgRefs[0]);
+      if (dims) viewBox = `0 0 ${dims.width} ${dims.height}`;
     }
 
     const designs = await generateDesigns(

@@ -66,8 +66,15 @@ async function runOnce() {
     console.log("5. Verify red background in SVG");
     const svgText = await fetch(`${BASE_URL}${src}`).then((r) => r.text());
     assert(svgText.includes("СЕРТИФИКАТ"), "Certificate text not preserved");
-    const redMatch = svgText.match(/(fill|stop-color)="(#[c-fC-F][0-9a-fA-F][0-2][0-9a-fA-F]{3}|#ef4444|red|#FF0000|#D32F2F|#cc0000|#c8102e|#b91c1c|#dc2626)"/i);
-    assert(redMatch, "Background not red");
+    const isRedHex = (hex) => {
+      const h = hex.length === 4 ? hex.replace(/([0-9a-f])/gi, "$1$1").slice(0, 7) : hex;
+      const r = parseInt(h.slice(1, 3), 16);
+      const g = parseInt(h.slice(3, 5), 16);
+      const b = parseInt(h.slice(5, 7), 16);
+      return r >= 120 && r > g * 1.5 && r > b * 1.5;
+    };
+    const fills = [...svgText.matchAll(/(?:fill|stop-color)="(#[0-9a-f]{3}(?:[0-9a-f]{3})?)"/gi)].map((m) => m[1]);
+    assert(fills.some(isRedHex) || /(?:fill|stop-color)="red"/i.test(svgText), "Background not red");
     console.log("   SVG text and red background OK");
   } catch (e) {
     await page.screenshot({ path: "/tmp/e2e-image-edit-failure.png" });

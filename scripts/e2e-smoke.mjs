@@ -23,6 +23,8 @@ async function runOnce() {
     console.log("   /create loaded with heading:", heading.trim());
 
     console.log("2. Select 'Логотип' template");
+    await page.getByText("Сгенерировать новый дизайн", { exact: true }).first().click();
+    await page.getByText("Логотип", { exact: true }).first().waitFor({ timeout: 15000 });
     await page.getByText("Логотип", { exact: true }).first().click();
     // wait for the chat to become active
     await page.waitForFunction(() => {
