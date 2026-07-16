@@ -43,7 +43,30 @@ The app uses an OpenAI-compatible proxy at `ANTHROPIC_BASE_URL`.
 - `claude-sonnet-4-6` is used as the automatic fallback when the primary model returns 524/timeouts.
 - `max_output_tokens` is sent alongside `max_tokens` to maximize compatibility.
 - Default token budgets:
-  - New generation: 12000 tokens
-  - Design edits: 16000 tokens (uploaded images often need more room for faithful recreation)
-- Request timeout is scaled with token budget (max 4 minutes).
+  - New generation: 16000 tokens
+  - Design edits: 24000 tokens (uploaded images often need more room for faithful recreation)
+- Request timeout is scaled with token budget (max 5 minutes).
 - To manually switch models, set `ANTHROPIC_MODEL` in `.env` and restart the server.
+
+## Monitoring
+
+The app exposes operational endpoints and Prometheus metrics for production observability.
+
+- `GET /api/health` — liveness probe, returns `{ "status": "ok", "uptime_ms": <ms>, "timestamp": "..." }`.
+- `GET /api/metrics` — Prometheus exposition format with the following metrics:
+  - `chat_requests_total{model, status, error_type}` — total `/api/chat` requests.
+  - `chat_response_duration_ms{model}` — response duration histogram.
+  - `chat_tokens_total{model}` — total LLM tokens consumed.
+- Each `/api/chat` request is logged as JSON with `type: "chat-api"`, `status`, `duration_ms`, `hasFiles`, `messageLength` and `error`.
+
+To wire into Prometheus, add a scrape job:
+
+```yaml
+scrape_configs:
+  - job_name: "ai-designer"
+    static_configs:
+      - targets: ["localhost:3000"]
+    metrics_path: "/api/metrics"
+```
+
+Suggested alert: trigger when the percentage of `chat_requests_total{error_type="524"}` over the last 5 minutes exceeds 5% of all `chat_requests_total`.
