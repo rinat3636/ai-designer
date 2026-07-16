@@ -1,10 +1,31 @@
 import fs from "fs";
 import path from "path";
+import { AsyncLocalStorage } from "async_hooks";
 import { prisma } from "@/lib/prisma";
 import { promptToPngDataUrl } from "./prompt-image";
 import { memoryToPromptText, type MemorySnapshot } from "./memory";
 import { applySvgOps, listElementIds, SvgOp } from "./svg-edit";
 import { injectQrCode } from "./qr";
+
+export type LlmUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  model?: string;
+};
+
+export type UsageCallback = (usage: LlmUsage) => void;
+
+const llmUsageStore = new AsyncLocalStorage<{ onUsage?: UsageCallback }>();
+
+export function withLlmUsage<T>(onUsage: UsageCallback, fn: () => Promise<T>): Promise<T> {
+  return llmUsageStore.run({ onUsage }, fn);
+}
+
+export function notifyLlmUsage(usage: LlmUsage) {
+  const store = llmUsageStore.getStore();
+  store?.onUsage?.(usage);
+}
 
 export type Concept = {
   name: string;
@@ -85,7 +106,8 @@ export async function callChatCompletionRaw(
   jsonMode = false,
   signal?: AbortSignal,
   temperature?: number,
-  preferredModel?: string
+  preferredModel?: string,
+  onUsage?: UsageCallback
 ): Promise<string | null> {
   const cfg = getApiConfig();
   const primary = preferredModel || cfg?.model || FALLBACK_MODEL;
@@ -105,7 +127,7 @@ export async function callChatCompletionRaw(
       } else if (attempt > 0) {
         console.warn(`Chat completion retry ${attempt + 1}/${MAX_ATTEMPTS}`);
       }
-      const result = await callChatCompletionOnce(systemPrompt, messages, maxTokens, jsonMode, signal, temperature, model);
+      const result = await callChatCompletionOnce(systemPrompt, messages, maxTokens, jsonMode, signal, temperature, model, onUsage);
       if (result.ok) return result.text;
       if (!result.retryable) break; // try fallback if any
     }
@@ -124,7 +146,8 @@ async function callChatCompletionOnce(
   jsonMode = false,
   signal?: AbortSignal,
   temperature?: number,
-  model?: string
+  model?: string,
+  onUsage?: UsageCallback
 ): Promise<ChatCompletionAttempt> {
   const cfg = getApiConfig();
   if (!cfg) return { ok: false, retryable: false };
@@ -176,6 +199,11 @@ async function callChatCompletionOnce(
 
     const data = (await res.json()) as ChatCompletionResponse;
     const choice = data.choices?.[0];
+    const usage: LlmUsage = data.usage ? { ...data.usage, model: useModel } : { model: useModel };
+    if (onUsage) {
+      onUsage(usage);
+    }
+    notifyLlmUsage(usage);
     console.log("Chat completion usage:", JSON.stringify(data.usage), "finish_reason:", choice?.finish_reason);
     return { ok: true, text: choice?.message?.content?.trim() || null };
   } catch (e) {
@@ -193,9 +221,10 @@ export async function callChatCompletion(
   maxTokens = 4096,
   jsonMode = false,
   signal?: AbortSignal,
-  temperature?: number
+  temperature?: number,
+  onUsage?: UsageCallback
 ): Promise<string | null> {
-  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal, temperature);
+  return callChatCompletionRaw(systemPrompt, [{ role: "user", content: userPrompt }], maxTokens, jsonMode, signal, temperature, undefined, onUsage);
 }
 
 export type ProjectMemorySnapshot = MemorySnapshot;

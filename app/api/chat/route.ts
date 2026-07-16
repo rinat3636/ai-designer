@@ -9,6 +9,7 @@ import {
   callChatCompletion,
   extractJson,
   analyzeImage,
+  withLlmUsage,
   type Brief,
   type Concept,
   type ChatMessage,
@@ -17,6 +18,7 @@ import {
 import { getViewBoxForTemplate, parseUserSize } from "@/lib/design";
 import { saveSvg, readLocalSvg, readLocalImageSize } from "@/lib/storage";
 import { buildMemorySnapshot, rememberGenerationFacts, recordEditOutcome } from "@/lib/memory";
+import { recordChatMetrics } from "@/lib/metrics";
 
 export const maxDuration = 300;
 
@@ -480,16 +482,39 @@ export async function POST(request: NextRequest) {
   } catch {
     // invalid JSON will be handled by handleChat returning an error
   }
+
+  let totalTokens = 0;
+  let lastModel = process.env.ANTHROPIC_MODEL || "claude-fable-5";
+  const onUsage = (usage: { total_tokens?: number; model?: string }) => {
+    if (usage.total_tokens) totalTokens += usage.total_tokens;
+    if (usage.model) lastModel = usage.model;
+  };
+
   try {
-    const response = await handleChat(body);
+    const response = await withLlmUsage(onUsage, async () => handleChat(body));
+    const duration = Date.now() - start;
     logChatApi(start, response.status, body);
+    const errorType = getErrorType(response.status, body);
+    recordChatMetrics({ model: lastModel, status: response.status, errorType, durationMs: duration, tokens: totalTokens });
     return response;
   } catch (error: any) {
     console.error("Chat API error", error);
+    const duration = Date.now() - start;
     logChatApi(start, 500, body, { error: error.message || "Chat processing failed" });
+    recordChatMetrics({ model: lastModel, status: 500, errorType: "server_error", durationMs: duration, tokens: totalTokens });
     return NextResponse.json(
       { error: error.message || "Chat processing failed" },
       { status: 500 }
     );
   }
+}
+
+function getErrorType(status: number, body: any): string {
+  if (status >= 500) return body?.error?.includes("524") || body?.error?.includes("timeout") ? "524" : "server_error";
+  if (status === 429) return "rate_limit";
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "limit";
+  if (status === 404) return "not_found";
+  if (status >= 400) return "bad_request";
+  return "none";
 }
