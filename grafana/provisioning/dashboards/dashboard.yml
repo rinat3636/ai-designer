@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "AI Designer Dashboards"
+    orgId: 1
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

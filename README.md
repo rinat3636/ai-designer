@@ -70,3 +70,24 @@ scrape_configs:
 ```
 
 Suggested alert: trigger when the percentage of `chat_requests_total{error_type="524"}` over the last 5 minutes exceeds 5% of all `chat_requests_total`.
+
+### Local monitoring stack
+
+A ready-to-use Docker Compose stack is included. Start it while the app is running on port 3000:
+
+```bash
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3001 (login `admin` / `admin`)
+- Alertmanager: http://localhost:9093
+- The "AI Designer" dashboard is provisioned automatically.
+
+Run the staging smoke test against the local server:
+
+```bash
+node scripts/e2e-staging.mjs
+# or against a deployed URL
+BASE_URL=https://your-domain.trycloudflare.com node scripts/e2e-staging.mjs
+```

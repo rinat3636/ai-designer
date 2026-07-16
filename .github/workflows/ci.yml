@@ -23,3 +23,32 @@ jobs:
       - run: npm run typecheck
       - run: npm run test
       - run: npm run build
+
+  staging-smoke:
+    needs: check
+    runs-on: ubuntu-latest
+    if: secrets.ANTHROPIC_API_KEY != ''
+    env:
+      DATABASE_URL: file:./dev.db
+      APP_SECRET: ci-only-secret-32-chars-abcdef123456
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.cheat-ai.shop' }}
+      ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-fable-5' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma db push
+      - run: npm run build
+      - run: |
+          npm start &
+          for i in {1..30}; do
+            curl -s http://localhost:3000/api/health && break
+            sleep 1
+          done
+      - run: node scripts/e2e-staging.mjs
+        env:
+          BASE_URL: http://localhost:3000
